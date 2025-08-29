@@ -2,6 +2,7 @@ import imageio, os, torch, warnings, torchvision, argparse, json
 from peft import LoraConfig, inject_adapter_in_model
 from PIL import Image
 import pandas as pd
+import shutil
 from tqdm import tqdm
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration
@@ -408,8 +409,8 @@ class ModelLogger:
             state_dict = accelerator.unwrap_model(model).export_trainable_state_dict(state_dict, remove_prefix=self.remove_prefix_in_ckpt)
             state_dict = self.state_dict_converter(state_dict)
             os.makedirs(self.output_path, exist_ok=True)
-            path = os.path.join(self.output_path, f"epoch-{epoch_id}.safetensors")
-            accelerator.save(state_dict, path, safe_serialization=True)
+            save_path = os.path.join(self.output_path, f"epoch-{epoch_id}.safetensors")
+            accelerator.save(state_dict, save_path, safe_serialization=True)
 
             # TODO: add model validation
             self.validate_model(accelerator.unwrap_model(model), f"epoch-{epoch_id}")
@@ -419,49 +420,43 @@ class ModelLogger:
         if save_steps is not None and self.num_steps % save_steps != 0:
             self.save_model(accelerator, model, f"step-{self.num_steps}.safetensors")
 
-
-    def save_model(self, accelerator, model, file_name):
+    def save_model(self, accelerator, model, file_name, save_whole=True):
         accelerator.wait_for_everyone()
         if accelerator.is_main_process:
-            state_dict = accelerator.get_state_dict(model)
-            state_dict = accelerator.unwrap_model(model).export_trainable_state_dict(state_dict, remove_prefix=self.remove_prefix_in_ckpt)
-            state_dict = self.state_dict_converter(state_dict)
-            os.makedirs(self.output_path, exist_ok=True)
-            path = os.path.join(self.output_path, file_name)
-            accelerator.save(state_dict, path, safe_serialization=True)
+            if save_whole:
+                #TODO: "checkpoint" can be edited
+                if os.path.exists(os.path.join(self.output_path, "checkpoint")):
+                    checkpoints = os.listdir(os.path.join(self.output_path, "checkpoint"))
+                    checkpoints = [d for d in checkpoints if "epoch" not in d]
+                    checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
+
+                    # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
+                    if len(checkpoints) >= 3: #TODO: 3 can be edited
+                        num_to_remove = len(checkpoints) - 2 #TODO: 2 can be edited
+                        removing_checkpoints = checkpoints[0:num_to_remove]
+
+                        accelerator.print(f"removing checkpoints: {', '.join(removing_checkpoints)}")
+
+                        for removing_checkpoint in removing_checkpoints:
+                            removing_checkpoint = os.path.join(self.output_path, "checkpoint", removing_checkpoint)
+                            shutil.rmtree(removing_checkpoint)
+
+                save_path = os.path.join(self.output_path, "checkpoint", os.path.splitext(file_name)[0])
+                accelerator.save_state(save_path)
+            else:
+                state_dict = accelerator.get_state_dict(model)
+                state_dict = accelerator.unwrap_model(model).export_trainable_state_dict(state_dict, remove_prefix=self.remove_prefix_in_ckpt)
+                state_dict = self.state_dict_converter(state_dict)
+                os.makedirs(self.output_path, exist_ok=True)
+                path = os.path.join(self.output_path, file_name)
+                accelerator.save(state_dict, path, safe_serialization=True)
 
 
     # TODO: change the validation pipeline according to Difix model
-    def validate_model(self, model, folder_str):
-        for dataset_name, dataset_loader in self.dataset_dict.items():
-            os.makedirs(os.path.join(self.output_path, dataset_name, folder_str), exist_ok=True)
-            for data_id, data in enumerate(dataset_loader):
-                if data_id >= 4: #TODO
-                    break
-                result_img = model.pipe( #TODO
-                    input_image = data["image"],
-                    condition_flatlit = data["condition_flatlit"],
-                    condition_shading = data["condition_shading"] if "condition_shading" in data else None,
-                    light_dir = data["light_dir"],
-                    height = data["image"].size[1],
-                    width = data["image"].size[0]
-                )
-                if "condition_shading" in data:
-                    imgs = [data["condition_flatlit"], data["condition_shading"], result_img, data["image"]]
-                    total_width = data["image"].size[0] * 4
-                else:
-                    imgs = [data["condition_flatlit"], result_img, data["image"]]
-                    total_width = data["image"].size[0] * 3
-                height = data["image"].size[1]
-                new_img = Image.new('RGB', (total_width, height))
-                x_offset = 0
-                for im in imgs:
-                    new_img.paste(im, (x_offset, 0))
-                    x_offset += im.width
-                caption_batch(new_img, data)
-                result_path = os.path.join(self.output_path, dataset_name, folder_str, f"{data_id:03d}.png")
-                new_img.save(result_path)
-        model.pipe.scheduler.set_timesteps(1000, training=True) #TODO
+    def validate_model(self, model):
+        ...
+
+        # model.pipe.scheduler.set_timesteps(1000, training=True) #TODO
 
 
 def launch_training_task(
@@ -480,6 +475,7 @@ def launch_training_task(
     mixed_precision: str = None,
     report_to: str = None,
     tracker_config: dict = None,
+    load_from_latest: bool = False,
 ):
     dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=num_workers)
 
@@ -493,9 +489,24 @@ def launch_training_task(
     )
     model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, dataloader, scheduler)
     if accelerator.is_main_process:
-        accelerator.init_trackers("train_ver0", tracker_config) #TODO
+        accelerator.init_trackers("train_ver0", tracker_config) # TODO: change the tracker name
 
-    for epoch_id in range(num_epochs):
+    init_epoch = 0
+    if load_from_latest and os.path.exists(os.path.join(output_dir, "checkpoint")):
+        dirs = os.listdir(os.path.join(output_dir, "checkpoint"))
+        epoch_dirs = [d for d in dirs if "epoch" in d]
+        dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
+        epoch_dirs = sorted(epoch_dirs, key=lambda x: int(x.split("-")[-1]))
+        path = dirs[-1] if len(dirs) > 0 else None
+        if path is not None:
+            accelerator.print(f"Resuming from checkpoint {path}")
+            accelerator.load_state(os.path.join(output_dir, "checkpoint", path))
+            global_step = int(path.split("-")[1])
+
+            model_logger.num_steps = global_step
+            init_epoch = int(epoch_dirs[-1].split("-")[-1]) + 1 if len(epoch_dirs) > 0 else init_epoch
+
+    for epoch_id in range(init_epoch, num_epochs):
         tq_dataloader = tqdm(dataloader, desc="Steps", disable=not accelerator.is_local_main_process)
         for data in tq_dataloader:
             train_loss = 0.0
@@ -505,14 +516,17 @@ def launch_training_task(
                 accelerator.backward(loss)
                 optimizer.step()
                 scheduler.step()
-                train_loss += loss.item() / gradient_accumulation_steps
+
+                # TODO: get the losses across all processes for logging (if we use distributed training).
+                # train_loss += loss.item() / gradient_accumulation_steps
+                avg_loss = accelerator.gather(loss.repeat(1)).mean()
+                train_loss += avg_loss.item() / gradient_accumulation_steps
             if accelerator.sync_gradients:
                 model_logger.on_step_end(accelerator, model, save_steps)
                 accelerator.log({"train_loss": train_loss}, step=model_logger.num_steps)
                 logs = {"step_loss": train_loss, "epoch": epoch_id}
                 tq_dataloader.set_postfix(**logs)
-        if save_steps is None:
-            model_logger.on_epoch_end(accelerator, model, epoch_id)
+        model_logger.on_epoch_end(accelerator, model, epoch_id)
     model_logger.on_training_end(accelerator, model, save_steps)
 
     accelerator.wait_for_everyone()
@@ -619,6 +633,7 @@ def qwen_image_parser():
     parser.add_argument("--lora_target_modules", type=str, default="q,k,v,o,ffn.0,ffn.2", help="Which layers LoRA is added to.")
     parser.add_argument("--lora_rank", type=int, default=32, help="Rank of LoRA.")
     parser.add_argument("--lora_checkpoint", type=str, default=None, help="Path to the LoRA checkpoint. If provided, LoRA will be loaded from this checkpoint.")
+    parser.add_argument("--resume_from_checkpoint", default=False, action="store_true", help="Whether to use pretrained checkpoint.")
     parser.add_argument("--extra_inputs", default=None, help="Additional model inputs, comma-separated.")
     parser.add_argument("--use_gradient_checkpointing", default=False, action="store_true", help="Whether to use gradient checkpointing.")
     parser.add_argument("--use_gradient_checkpointing_offload", default=False, action="store_true", help="Whether to offload gradient checkpointing to CPU memory.")
