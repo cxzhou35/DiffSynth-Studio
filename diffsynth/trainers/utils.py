@@ -4,7 +4,7 @@ from PIL import Image
 import pandas as pd
 from tqdm import tqdm
 from accelerate import Accelerator
-from accelerate.utils import DistributedDataParallelKwargs
+from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration
 
 
 
@@ -27,7 +27,7 @@ class ImageDataset(torch.utils.data.Dataset):
             max_pixels = args.max_pixels
             data_file_keys = args.data_file_keys.split(",")
             repeat = args.dataset_repeat
-            
+
         self.base_path = base_path
         self.max_pixels = max_pixels
         self.height = height
@@ -44,7 +44,7 @@ class ImageDataset(torch.utils.data.Dataset):
         elif height is None and width is None:
             print("Height and width are none. Setting `dynamic_resolution` to True.")
             self.dynamic_resolution = True
-            
+
         if metadata_path is None:
             print("No metadata. Trying to generate it.")
             metadata = self.generate_metadata(base_path)
@@ -86,8 +86,8 @@ class ImageDataset(torch.utils.data.Dataset):
         metadata["image"] = image_list
         metadata["prompt"] = prompt_list
         return metadata
-    
-    
+
+
     def crop_and_resize(self, image, target_height, target_width):
         width, height = image.size
         scale = max(target_width / width, target_height / height)
@@ -98,8 +98,8 @@ class ImageDataset(torch.utils.data.Dataset):
         )
         image = torchvision.transforms.functional.center_crop(image, (target_height, target_width))
         return image
-    
-    
+
+
     def get_height_width(self, image):
         if self.dynamic_resolution:
             width, height = image.size
@@ -111,14 +111,14 @@ class ImageDataset(torch.utils.data.Dataset):
         else:
             height, width = self.height, self.width
         return height, width
-    
-    
+
+
     def load_image(self, file_path):
         image = Image.open(file_path).convert("RGB")
         image = self.crop_and_resize(image, *self.get_height_width(image))
         return image
-    
-    
+
+
     def load_data(self, file_path):
         return self.load_image(file_path)
 
@@ -137,7 +137,7 @@ class ImageDataset(torch.utils.data.Dataset):
                     warnings.warn(f"cannot load file {data[key]}.")
                     return None
         return data
-    
+
 
     def __len__(self):
         return len(self.data) * self.repeat
@@ -154,7 +154,7 @@ class VideoDataset(torch.utils.data.Dataset):
         height_division_factor=16, width_division_factor=16,
         data_file_keys=("video",),
         image_file_extension=("jpg", "jpeg", "png", "webp"),
-        video_file_extension=("mp4", "avi", "mov", "wmv", "mkv", "flv", "webm", "gif"),
+        video_file_extension=("mp4", "avi", "mov", "wmv", "mkv", "flv", "webm"),
         repeat=1,
         args=None,
     ):
@@ -167,7 +167,7 @@ class VideoDataset(torch.utils.data.Dataset):
             num_frames = args.num_frames
             data_file_keys = args.data_file_keys.split(",")
             repeat = args.dataset_repeat
-        
+
         self.base_path = base_path
         self.num_frames = num_frames
         self.time_division_factor = time_division_factor
@@ -181,14 +181,14 @@ class VideoDataset(torch.utils.data.Dataset):
         self.image_file_extension = image_file_extension
         self.video_file_extension = video_file_extension
         self.repeat = repeat
-        
+
         if height is not None and width is not None:
             print("Height and width are fixed. Setting `dynamic_resolution` to False.")
             self.dynamic_resolution = False
         elif height is None and width is None:
             print("Height and width are none. Setting `dynamic_resolution` to True.")
             self.dynamic_resolution = True
-            
+
         if metadata_path is None:
             print("No metadata. Trying to generate it.")
             metadata = self.generate_metadata(base_path)
@@ -201,8 +201,8 @@ class VideoDataset(torch.utils.data.Dataset):
         else:
             metadata = pd.read_csv(metadata_path)
             self.data = [metadata.iloc[i].to_dict() for i in range(len(metadata))]
-            
-    
+
+
     def generate_metadata(self, folder):
         video_list, prompt_list = [], []
         file_set = set(os.listdir(folder))
@@ -224,8 +224,8 @@ class VideoDataset(torch.utils.data.Dataset):
         metadata["video"] = video_list
         metadata["prompt"] = prompt_list
         return metadata
-        
-        
+
+
     def crop_and_resize(self, image, target_height, target_width):
         width, height = image.size
         scale = max(target_width / width, target_height / height)
@@ -236,8 +236,8 @@ class VideoDataset(torch.utils.data.Dataset):
         )
         image = torchvision.transforms.functional.center_crop(image, (target_height, target_width))
         return image
-    
-    
+
+
     def get_height_width(self, image):
         if self.dynamic_resolution:
             width, height = image.size
@@ -249,8 +249,8 @@ class VideoDataset(torch.utils.data.Dataset):
         else:
             height, width = self.height, self.width
         return height, width
-    
-    
+
+
     def get_num_frames(self, reader):
         num_frames = self.num_frames
         if int(reader.count_frames()) < num_frames:
@@ -258,54 +258,9 @@ class VideoDataset(torch.utils.data.Dataset):
             while num_frames > 1 and num_frames % self.time_division_factor != self.time_division_remainder:
                 num_frames -= 1
         return num_frames
-    
-    def _load_gif(self, file_path):
-        gif_img = Image.open(file_path)
-        frame_count = 0
-        delays, frames = [], []
-        while True:
-            delay = gif_img.info.get('duration', 100) # ms
-            delays.append(delay)
-            rgb_frame = gif_img.convert("RGB")   
-            croped_frame = self.crop_and_resize(rgb_frame, *self.get_height_width(rgb_frame))
-            frames.append(croped_frame)             
-            frame_count += 1
-            try:
-                gif_img.seek(frame_count)
-            except:
-                break
-        # delays canbe used to calculate framerates
-        # i guess it is better to sample images with stable interval,
-        # and using minimal_interval as the interval, 
-        # and framerate = 1000 / minimal_interval
-        if any((delays[0] != i) for i in delays):
-            minimal_interval = min([i for i in delays if i > 0])
-            # make a ((start,end),frameid) struct
-            start_end_idx_map = [((sum(delays[:i]), sum(delays[:i+1])), i) for i in range(len(delays))]
-            _frames = []
-            # according gemini-code-assist, make it more efficient to locate
-            # where to sample the frame
-            last_match = 0
-            for i in range(sum(delays) // minimal_interval):
-                current_time = minimal_interval * i
-                for idx, ((start, end), frame_idx) in enumerate(start_end_idx_map[last_match:]):
-                    if start <= current_time < end:
-                        _frames.append(frames[frame_idx])
-                        last_match = idx + last_match
-                        break
-            frames = _frames
-        num_frames = len(frames)
-        if num_frames > self.num_frames:
-            num_frames = self.num_frames
-        else:
-            while num_frames > 1 and num_frames % self.time_division_factor != self.time_division_remainder:
-                num_frames -= 1
-        frames = frames[:num_frames]
-        return frames
-    
+
+
     def load_video(self, file_path):
-        if file_path.lower().endswith(".gif"):
-            return self._load_gif(file_path)
         reader = imageio.get_reader(file_path)
         num_frames = self.get_num_frames(reader)
         frames = []
@@ -316,25 +271,25 @@ class VideoDataset(torch.utils.data.Dataset):
             frames.append(frame)
         reader.close()
         return frames
-    
-    
+
+
     def load_image(self, file_path):
         image = Image.open(file_path).convert("RGB")
         image = self.crop_and_resize(image, *self.get_height_width(image))
         frames = [image]
         return frames
-    
-    
+
+
     def is_image(self, file_path):
         file_ext_name = file_path.split(".")[-1]
         return file_ext_name.lower() in self.image_file_extension
-    
-    
+
+
     def is_video(self, file_path):
         file_ext_name = file_path.split(".")[-1]
         return file_ext_name.lower() in self.video_file_extension
-    
-    
+
+
     def load_data(self, file_path):
         if self.is_image(file_path):
             return self.load_image(file_path)
@@ -354,7 +309,7 @@ class VideoDataset(torch.utils.data.Dataset):
                     warnings.warn(f"cannot load file {data[key]}.")
                     return None
         return data
-    
+
 
     def __len__(self):
         return len(self.data) * self.repeat
@@ -364,28 +319,28 @@ class VideoDataset(torch.utils.data.Dataset):
 class DiffusionTrainingModule(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        
-        
+
+
     def to(self, *args, **kwargs):
         for name, model in self.named_children():
             model.to(*args, **kwargs)
         return self
-        
-        
+
+
     def trainable_modules(self):
         trainable_modules = filter(lambda p: p.requires_grad, self.parameters())
         return trainable_modules
-    
-    
+
+
     def trainable_param_names(self):
         trainable_param_names = list(filter(lambda named_param: named_param[1].requires_grad, self.named_parameters()))
         trainable_param_names = set([named_param[0] for named_param in trainable_param_names])
         return trainable_param_names
-    
-    
+
+
     def add_lora_to_model(self, model, target_modules, lora_rank, lora_alpha=None, upcast_dtype=None):
         if lora_alpha is None:
-            lora_alpha = lora_rank
+           lora_alpha = lora_rank
         lora_config = LoraConfig(r=lora_rank, lora_alpha=lora_alpha, target_modules=target_modules)
         model = inject_adapter_in_model(lora_config, model)
         if upcast_dtype is not None:
@@ -401,8 +356,6 @@ class DiffusionTrainingModule(torch.nn.Module):
             if "lora_A.weight" in key or "lora_B.weight" in key:
                 new_key = key.replace("lora_A.weight", "lora_A.default.weight").replace("lora_B.weight", "lora_B.default.weight")
                 new_state_dict[new_key] = value
-            elif "lora_A.default.weight" in key or "lora_B.default.weight" in key:
-                new_state_dict[key] = value
         return new_state_dict
 
 
@@ -421,17 +374,31 @@ class DiffusionTrainingModule(torch.nn.Module):
 
 
 class ModelLogger:
-    def __init__(self, output_path, remove_prefix_in_ckpt=None, state_dict_converter=lambda x:x):
+    def __init__(self, output_path, remove_prefix_in_ckpt=None, state_dict_converter=lambda x:x, dataset_dict=None):
         self.output_path = output_path
         self.remove_prefix_in_ckpt = remove_prefix_in_ckpt
         self.state_dict_converter = state_dict_converter
         self.num_steps = 0
+
+        # TODO: add dataset dict
+        self.dataset_dict = {}
+        if dataset_dict is not None:
+            for split, ds in dataset_dict.items():
+                self.dataset_dict[split] = torch.utils.data.DataLoader(
+                    ds,
+                    shuffle=True,
+                    collate_fn=lambda x: x[0],
+                    num_workers=1,
+                )
 
 
     def on_step_end(self, accelerator, model, save_steps=None):
         self.num_steps += 1
         if save_steps is not None and self.num_steps % save_steps == 0:
             self.save_model(accelerator, model, f"step-{self.num_steps}.safetensors")
+
+            # TODO: add model validation
+            self.validate_model(accelerator.unwrap_model(model), f"step-{self.num_steps}")
 
 
     def on_epoch_end(self, accelerator, model, epoch_id):
@@ -443,6 +410,9 @@ class ModelLogger:
             os.makedirs(self.output_path, exist_ok=True)
             path = os.path.join(self.output_path, f"epoch-{epoch_id}.safetensors")
             accelerator.save(state_dict, path, safe_serialization=True)
+
+            # TODO: add model validation
+            self.validate_model(accelerator.unwrap_model(model), f"epoch-{epoch_id}")
 
 
     def on_training_end(self, accelerator, model, save_steps=None):
@@ -461,6 +431,39 @@ class ModelLogger:
             accelerator.save(state_dict, path, safe_serialization=True)
 
 
+    # TODO: change the validation pipeline according to Difix model
+    def validate_model(self, model, folder_str):
+        for dataset_name, dataset_loader in self.dataset_dict.items():
+            os.makedirs(os.path.join(self.output_path, dataset_name, folder_str), exist_ok=True)
+            for data_id, data in enumerate(dataset_loader):
+                if data_id >= 4: #TODO
+                    break
+                result_img = model.pipe( #TODO
+                    input_image = data["image"],
+                    condition_flatlit = data["condition_flatlit"],
+                    condition_shading = data["condition_shading"] if "condition_shading" in data else None,
+                    light_dir = data["light_dir"],
+                    height = data["image"].size[1],
+                    width = data["image"].size[0]
+                )
+                if "condition_shading" in data:
+                    imgs = [data["condition_flatlit"], data["condition_shading"], result_img, data["image"]]
+                    total_width = data["image"].size[0] * 4
+                else:
+                    imgs = [data["condition_flatlit"], result_img, data["image"]]
+                    total_width = data["image"].size[0] * 3
+                height = data["image"].size[1]
+                new_img = Image.new('RGB', (total_width, height))
+                x_offset = 0
+                for im in imgs:
+                    new_img.paste(im, (x_offset, 0))
+                    x_offset += im.width
+                caption_batch(new_img, data)
+                result_path = os.path.join(self.output_path, dataset_name, folder_str, f"{data_id:03d}.png")
+                new_img.save(result_path)
+        model.pipe.scheduler.set_timesteps(1000, training=True) #TODO
+
+
 def launch_training_task(
     dataset: torch.utils.data.Dataset,
     model: DiffusionTrainingModule,
@@ -472,27 +475,48 @@ def launch_training_task(
     num_epochs: int = 1,
     gradient_accumulation_steps: int = 1,
     find_unused_parameters: bool = False,
+    output_dir: str = None,
+    logging_dir: str = None,
+    mixed_precision: str = None,
+    report_to: str = None,
+    tracker_config: dict = None,
 ):
     dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=num_workers)
+
+    accelerator_project_config = ProjectConfiguration(project_dir=output_dir, logging_dir=logging_dir)
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
+        mixed_precision=mixed_precision,
+        log_with=report_to,
+        project_config=accelerator_project_config,
         kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=find_unused_parameters)],
     )
     model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, dataloader, scheduler)
-    
+    if accelerator.is_main_process:
+        accelerator.init_trackers("train_ver0", tracker_config) #TODO
+
     for epoch_id in range(num_epochs):
-        for data in tqdm(dataloader):
+        tq_dataloader = tqdm(dataloader, desc="Steps", disable=not accelerator.is_local_main_process)
+        for data in tq_dataloader:
+            train_loss = 0.0
             with accelerator.accumulate(model):
                 optimizer.zero_grad()
                 loss = model(data)
                 accelerator.backward(loss)
                 optimizer.step()
-                model_logger.on_step_end(accelerator, model, save_steps)
                 scheduler.step()
+                train_loss += loss.item() / gradient_accumulation_steps
+            if accelerator.sync_gradients:
+                model_logger.on_step_end(accelerator, model, save_steps)
+                accelerator.log({"train_loss": train_loss}, step=model_logger.num_steps)
+                logs = {"step_loss": train_loss, "epoch": epoch_id}
+                tq_dataloader.set_postfix(**logs)
         if save_steps is None:
             model_logger.on_epoch_end(accelerator, model, epoch_id)
     model_logger.on_training_end(accelerator, model, save_steps)
 
+    accelerator.wait_for_everyone()
+    accelerator.end_training()
 
 def launch_data_process_task(model: DiffusionTrainingModule, dataset, output_path="./models"):
     dataloader = torch.utils.data.DataLoader(dataset, shuffle=False, collate_fn=lambda x: x[0])
@@ -603,6 +627,5 @@ def qwen_image_parser():
     parser.add_argument("--save_steps", type=int, default=None, help="Number of checkpoint saving invervals. If None, checkpoints will be saved every epoch.")
     parser.add_argument("--dataset_num_workers", type=int, default=0, help="Number of workers for data loading.")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
-    parser.add_argument("--processor_path", type=str, default=None, help="Path to the processor. If provided, the processor will be used for image editing.")
     parser.add_argument("--enable_fp8_training", default=False, action="store_true", help="Whether to enable FP8 training. Only available for LoRA training on a single GPU.")
     return parser
