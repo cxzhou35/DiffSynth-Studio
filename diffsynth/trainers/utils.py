@@ -157,7 +157,7 @@ class VideoDataset(torch.utils.data.Dataset):
         height_division_factor=16, width_division_factor=16,
         data_file_keys=("video",),
         image_file_extension=("jpg", "jpeg", "png", "webp"),
-        video_file_extension=("mp4", "avi", "mov", "wmv", "mkv", "flv", "webm"),
+        video_file_extension=("mp4", "avi", "mov", "wmv", "mkv", "flv", "webm", "gif"),
         repeat=1,
         args=None,
     ):
@@ -262,8 +262,53 @@ class VideoDataset(torch.utils.data.Dataset):
                 num_frames -= 1
         return num_frames
 
+    def _load_gif(self, file_path):
+        gif_img = Image.open(file_path)
+        frame_count = 0
+        delays, frames = [], []
+        while True:
+            delay = gif_img.info.get('duration', 100) # ms
+            delays.append(delay)
+            rgb_frame = gif_img.convert("RGB")
+            croped_frame = self.crop_and_resize(rgb_frame, *self.get_height_width(rgb_frame))
+            frames.append(croped_frame)
+            frame_count += 1
+            try:
+                gif_img.seek(frame_count)
+            except:
+                break
+        # delays canbe used to calculate framerates
+        # i guess it is better to sample images with stable interval,
+        # and using minimal_interval as the interval,
+        # and framerate = 1000 / minimal_interval
+        if any((delays[0] != i) for i in delays):
+            minimal_interval = min([i for i in delays if i > 0])
+            # make a ((start,end),frameid) struct
+            start_end_idx_map = [((sum(delays[:i]), sum(delays[:i+1])), i) for i in range(len(delays))]
+            _frames = []
+            # according gemini-code-assist, make it more efficient to locate
+            # where to sample the frame
+            last_match = 0
+            for i in range(sum(delays) // minimal_interval):
+                current_time = minimal_interval * i
+                for idx, ((start, end), frame_idx) in enumerate(start_end_idx_map[last_match:]):
+                    if start <= current_time < end:
+                        _frames.append(frames[frame_idx])
+                        last_match = idx + last_match
+                        break
+            frames = _frames
+        num_frames = len(frames)
+        if num_frames > self.num_frames:
+            num_frames = self.num_frames
+        else:
+            while num_frames > 1 and num_frames % self.time_division_factor != self.time_division_remainder:
+                num_frames -= 1
+        frames = frames[:num_frames]
+        return frames
 
     def load_video(self, file_path):
+        if file_path.lower().endswith(".gif"):
+            return self._load_gif(file_path)
         reader = imageio.get_reader(file_path)
         num_frames = self.get_num_frames(reader)
         frames = []
@@ -343,7 +388,7 @@ class DiffusionTrainingModule(torch.nn.Module):
 
     def add_lora_to_model(self, model, target_modules, lora_rank, lora_alpha=None, upcast_dtype=None):
         if lora_alpha is None:
-           lora_alpha = lora_rank
+            lora_alpha = lora_rank
         lora_config = LoraConfig(r=lora_rank, lora_alpha=lora_alpha, target_modules=target_modules)
         model = inject_adapter_in_model(lora_config, model)
         if upcast_dtype is not None:
@@ -359,6 +404,9 @@ class DiffusionTrainingModule(torch.nn.Module):
             if "lora_A.weight" in key or "lora_B.weight" in key:
                 new_key = key.replace("lora_A.weight", "lora_A.default.weight").replace("lora_B.weight", "lora_B.default.weight")
                 new_state_dict[new_key] = value
+            # TODO: check if this is needed
+            # elif "lora_A.default.weight" in key or "lora_B.default.weight" in key:
+            #     new_state_dict[key] = value
         return new_state_dict
 
 
@@ -432,31 +480,17 @@ class DiffusionTrainingModule(torch.nn.Module):
 
 
 class ModelLogger:
-    def __init__(self, output_path, remove_prefix_in_ckpt=None, state_dict_converter=lambda x:x, dataset_dict=None):
+    def __init__(self, output_path, remove_prefix_in_ckpt=None, state_dict_converter=lambda x:x):
         self.output_path = output_path
         self.remove_prefix_in_ckpt = remove_prefix_in_ckpt
         self.state_dict_converter = state_dict_converter
         self.num_steps = 0
-
-        # TODO: add dataset dict
-        self.dataset_dict = {}
-        if dataset_dict is not None:
-            for split, ds in dataset_dict.items():
-                self.dataset_dict[split] = torch.utils.data.DataLoader(
-                    ds,
-                    shuffle=True,
-                    collate_fn=lambda x: x[0],
-                    num_workers=1,
-                )
 
 
     def on_step_end(self, accelerator, model, save_steps=None):
         self.num_steps += 1
         if save_steps is not None and self.num_steps % save_steps == 0:
             self.save_model(accelerator, model, f"step-{self.num_steps}.safetensors")
-
-            # TODO: add model validation
-            self.validate_model(accelerator.unwrap_model(model), f"step-{self.num_steps}")
 
 
     def on_epoch_end(self, accelerator, model, epoch_id):
@@ -466,54 +500,24 @@ class ModelLogger:
             state_dict = accelerator.unwrap_model(model).export_trainable_state_dict(state_dict, remove_prefix=self.remove_prefix_in_ckpt)
             state_dict = self.state_dict_converter(state_dict)
             os.makedirs(self.output_path, exist_ok=True)
-            save_path = os.path.join(self.output_path, f"epoch-{epoch_id}.safetensors")
-            accelerator.save(state_dict, save_path, safe_serialization=True)
-
-            # TODO: add model validation
-            self.validate_model(accelerator.unwrap_model(model), f"epoch-{epoch_id}")
+            path = os.path.join(self.output_path, f"epoch-{epoch_id}.safetensors")
+            accelerator.save(state_dict, path, safe_serialization=True)
 
 
     def on_training_end(self, accelerator, model, save_steps=None):
         if save_steps is not None and self.num_steps % save_steps != 0:
             self.save_model(accelerator, model, f"step-{self.num_steps}.safetensors")
 
-    def save_model(self, accelerator, model, file_name, save_whole=True):
+
+    def save_model(self, accelerator, model, file_name):
         accelerator.wait_for_everyone()
         if accelerator.is_main_process:
-            if save_whole:
-                #TODO: "checkpoint" can be edited
-                if os.path.exists(os.path.join(self.output_path, "checkpoint")):
-                    checkpoints = os.listdir(os.path.join(self.output_path, "checkpoint"))
-                    checkpoints = [d for d in checkpoints if "epoch" not in d]
-                    checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
-
-                    # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
-                    if len(checkpoints) >= 3: #TODO: 3 can be edited
-                        num_to_remove = len(checkpoints) - 2 #TODO: 2 can be edited
-                        removing_checkpoints = checkpoints[0:num_to_remove]
-
-                        accelerator.print(f"removing checkpoints: {', '.join(removing_checkpoints)}")
-
-                        for removing_checkpoint in removing_checkpoints:
-                            removing_checkpoint = os.path.join(self.output_path, "checkpoint", removing_checkpoint)
-                            shutil.rmtree(removing_checkpoint)
-
-                save_path = os.path.join(self.output_path, "checkpoint", os.path.splitext(file_name)[0])
-                accelerator.save_state(save_path)
-            else:
-                state_dict = accelerator.get_state_dict(model)
-                state_dict = accelerator.unwrap_model(model).export_trainable_state_dict(state_dict, remove_prefix=self.remove_prefix_in_ckpt)
-                state_dict = self.state_dict_converter(state_dict)
-                os.makedirs(self.output_path, exist_ok=True)
-                path = os.path.join(self.output_path, file_name)
-                accelerator.save(state_dict, path, safe_serialization=True)
-
-
-    # TODO: change the validation pipeline according to Difix model
-    def validate_model(self, model):
-        ...
-
-        # model.pipe.scheduler.set_timesteps(1000, training=True) #TODO
+            state_dict = accelerator.get_state_dict(model)
+            state_dict = accelerator.unwrap_model(model).export_trainable_state_dict(state_dict, remove_prefix=self.remove_prefix_in_ckpt)
+            state_dict = self.state_dict_converter(state_dict)
+            os.makedirs(self.output_path, exist_ok=True)
+            path = os.path.join(self.output_path, file_name)
+            accelerator.save(state_dict, path, safe_serialization=True)
 
 
 def launch_training_task(
@@ -533,6 +537,7 @@ def launch_training_task(
     report_to: str = None,
     tracker_config: dict = None,
     load_from_latest: bool = False,
+    args=None,
 ):
     if args is not None:
         learning_rate = args.learning_rate
@@ -546,7 +551,7 @@ def launch_training_task(
     optimizer = torch.optim.AdamW(model.trainable_modules(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer)
     dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=num_workers)
-
+    # NOTE: set the project configuration
     accelerator_project_config = ProjectConfiguration(project_dir=output_dir, logging_dir=logging_dir)
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
@@ -575,8 +580,8 @@ def launch_training_task(
             init_epoch = int(epoch_dirs[-1].split("-")[-1]) + 1 if len(epoch_dirs) > 0 else init_epoch
 
     for epoch_id in range(init_epoch, num_epochs):
-        tq_dataloader = tqdm(dataloader, desc="Steps", disable=not accelerator.is_local_main_process)
-        for data in tq_dataloader:
+        dl_dataloader = tqdm(dataloader, desc="Training Steps", disable=not accelerator.is_local_main_process)
+        for data in dl_dataloader:
             train_loss = 0.0
             with accelerator.accumulate(model):
                 optimizer.zero_grad()
@@ -596,12 +601,12 @@ def launch_training_task(
                 model_logger.on_step_end(accelerator, model, save_steps)
                 accelerator.log({"train_loss": train_loss}, step=model_logger.num_steps)
                 logs = {"step_loss": train_loss, "epoch": epoch_id}
-                tq_dataloader.set_postfix(**logs)
+                dl_dataloader.set_postfix(**logs)
         model_logger.on_epoch_end(accelerator, model, epoch_id)
     model_logger.on_training_end(accelerator, model, save_steps)
 
-    accelerator.wait_for_everyone()
     accelerator.end_training()
+
 
 def launch_data_process_task(
     dataset: torch.utils.data.Dataset,
@@ -725,6 +730,7 @@ def qwen_image_parser():
     parser.add_argument("--save_steps", type=int, default=None, help="Number of checkpoint saving invervals. If None, checkpoints will be saved every epoch.")
     parser.add_argument("--dataset_num_workers", type=int, default=0, help="Number of workers for data loading.")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
+    parser.add_argument("--processor_path", type=str, default=None, help="Path to the processor. If provided, the processor will be used for image editing.")
     parser.add_argument("--enable_fp8_training", default=False, action="store_true", help="Whether to enable FP8 training. Only available for LoRA training on a single GPU.")
     parser.add_argument("--task", type=str, default="sft", required=False, help="Task type.")
     return parser
