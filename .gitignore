@@ -1,0 +1,13 @@
+__pycache__
+
+*.pyc
+*.egg-info/*
+*.DS_Store
+*.jpeg
+*.jpg
+*.png
+*.mp4
+
+data/
+output/
+logs/
