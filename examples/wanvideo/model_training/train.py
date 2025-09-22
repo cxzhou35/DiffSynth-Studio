@@ -1,7 +1,8 @@
 import torch, os, json
 from diffsynth import load_state_dict
 from diffsynth.pipelines.wan_video_new import WanVideoPipeline, ModelConfig
-from diffsynth.trainers.utils import DiffusionTrainingModule, VideoDataset, ModelLogger, launch_training_task, wan_parser
+from diffsynth.trainers.utils import DiffusionTrainingModule, ModelLogger, launch_training_task, wan_parser
+from diffsynth.trainers.unified_dataset import UnifiedDataset
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
@@ -20,37 +21,16 @@ class WanTrainingModule(DiffusionTrainingModule):
     ):
         super().__init__()
         # Load models
-        model_configs = []
-        if model_paths is not None:
-            model_paths = json.loads(model_paths)
-            model_configs += [ModelConfig(path=path) for path in model_paths]
-        if model_id_with_origin_paths is not None:
-            model_id_with_origin_paths = model_id_with_origin_paths.split(",")
-            model_configs += [ModelConfig(model_id=i.split(":")[0], origin_file_pattern=i.split(":")[1]) for i in model_id_with_origin_paths]
+        model_configs = self.parse_model_configs(model_paths, model_id_with_origin_paths, enable_fp8_training=False)
         self.pipe = WanVideoPipeline.from_pretrained(torch_dtype=torch.bfloat16, device="cpu", model_configs=model_configs)
         
-        # Reset training scheduler
-        self.pipe.scheduler.set_timesteps(1000, training=True)
+        # Training mode
+        self.switch_pipe_to_training_mode(
+            self.pipe, trainable_models,
+            lora_base_model, lora_target_modules, lora_rank, lora_checkpoint=lora_checkpoint,
+            enable_fp8_training=False,
+        )
         
-        # Freeze untrainable models
-        self.pipe.freeze_except([] if trainable_models is None else trainable_models.split(","))
-        
-        # Add LoRA to the base models
-        if lora_base_model is not None:
-            model = self.add_lora_to_model(
-                getattr(self.pipe, lora_base_model),
-                target_modules=lora_target_modules.split(","),
-                lora_rank=lora_rank
-            )
-            if lora_checkpoint is not None:
-                state_dict = load_state_dict(lora_checkpoint)
-                state_dict = self.mapping_lora_state_dict(state_dict)
-                load_result = model.load_state_dict(state_dict, strict=False)
-                print(f"LoRA checkpoint loaded: {lora_checkpoint}, total {len(state_dict)} keys")
-                if len(load_result[1]) > 0:
-                    print(f"Warning, LoRA key mismatch! Unexpected keys in LoRA checkpoint: {load_result[1]}")
-            setattr(self.pipe, lora_base_model, model)
-            
         # Store other configs
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.use_gradient_checkpointing_offload = use_gradient_checkpointing_offload
@@ -112,7 +92,23 @@ class WanTrainingModule(DiffusionTrainingModule):
 if __name__ == "__main__":
     parser = wan_parser()
     args = parser.parse_args()
-    dataset = VideoDataset(args=args)
+    dataset = UnifiedDataset(
+        base_path=args.dataset_base_path,
+        metadata_path=args.dataset_metadata_path,
+        repeat=args.dataset_repeat,
+        data_file_keys=args.data_file_keys.split(","),
+        main_data_operator=UnifiedDataset.default_video_operator(
+            base_path=args.dataset_base_path,
+            max_pixels=args.max_pixels,
+            height=args.height,
+            width=args.width,
+            height_division_factor=16,
+            width_division_factor=16,
+            num_frames=args.num_frames,
+            time_division_factor=4,
+            time_division_remainder=1,
+        ),
+    )
     model = WanTrainingModule(
         model_paths=args.model_paths,
         model_id_with_origin_paths=args.model_id_with_origin_paths,
@@ -130,13 +126,4 @@ if __name__ == "__main__":
         args.output_path,
         remove_prefix_in_ckpt=args.remove_prefix_in_ckpt
     )
-    optimizer = torch.optim.AdamW(model.trainable_modules(), lr=args.learning_rate, weight_decay=args.weight_decay)
-    scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer)
-    launch_training_task(
-        dataset, model, model_logger, optimizer, scheduler,
-        num_epochs=args.num_epochs,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        save_steps=args.save_steps,
-        find_unused_parameters=args.find_unused_parameters,
-        num_workers=args.dataset_num_workers,
-    )
+    launch_training_task(dataset, model, model_logger, args=args)

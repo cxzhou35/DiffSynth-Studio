@@ -140,13 +140,25 @@ class QwenImagePipeline(BasePipeline):
         timestep_id = torch.randint(0, self.scheduler.num_train_timesteps, (1,))
         timestep = self.scheduler.timesteps[timestep_id].to(dtype=self.torch_dtype, device=self.device)
         
-        inputs["latents"] = self.scheduler.add_noise(inputs["input_latents"], inputs["noise"], timestep)
-        training_target = self.scheduler.training_target(inputs["input_latents"], inputs["noise"], timestep)
+        noise = torch.randn_like(inputs["input_latents"])
+        inputs["latents"] = self.scheduler.add_noise(inputs["input_latents"], noise, timestep)
+        training_target = self.scheduler.training_target(inputs["input_latents"], noise, timestep)
         
         noise_pred = self.model_fn(**inputs, timestep=timestep)
         
         loss = torch.nn.functional.mse_loss(noise_pred.float(), training_target.float())
         loss = loss * self.scheduler.training_weight(timestep)
+        return loss
+    
+    
+    def direct_distill_loss(self, **inputs):
+        self.scheduler.set_timesteps(inputs["num_inference_steps"])
+        models = {name: getattr(self, name) for name in self.in_iteration_models}
+        for progress_id, timestep in enumerate(self.scheduler.timesteps):
+            timestep = timestep.unsqueeze(0).to(dtype=self.torch_dtype, device=self.device)
+            noise_pred = self.model_fn(**models, **inputs, timestep=timestep, progress_id=progress_id)
+            inputs["latents"] = self.step(self.scheduler, progress_id=progress_id, noise_pred=noise_pred, **inputs)
+        loss = torch.nn.functional.mse_loss(inputs["latents"].float(), inputs["input_latents"].float())
         return loss
     
     
@@ -174,16 +186,20 @@ class QwenImagePipeline(BasePipeline):
             computation_dtype=self.torch_dtype,
             computation_device="cuda",
         )
-        enable_vram_management(self.text_encoder, module_map=module_map, module_config=model_config)
-        enable_vram_management(self.dit, module_map=module_map, module_config=model_config)
-        enable_vram_management(self.vae, module_map=module_map, module_config=model_config)
+        if self.text_encoder is not None:
+            enable_vram_management(self.text_encoder, module_map=module_map, module_config=model_config)
+        if self.dit is not None:
+            enable_vram_management(self.dit, module_map=module_map, module_config=model_config)
+        if self.vae is not None:
+            enable_vram_management(self.vae, module_map=module_map, module_config=model_config)
     
     
-    def enable_vram_management(self, num_persistent_param_in_dit=None, vram_limit=None, vram_buffer=0.5, enable_dit_fp8_computation=False):
+    def enable_vram_management(self, num_persistent_param_in_dit=None, vram_limit=None, vram_buffer=0.5, auto_offload=True, enable_dit_fp8_computation=False):
         self.vram_management_enabled = True
-        if vram_limit is None:
+        if vram_limit is None and auto_offload:
             vram_limit = self.get_vram()
-        vram_limit = vram_limit - vram_buffer
+        if vram_limit is not None:
+            vram_limit = vram_limit - vram_buffer
         
         if self.text_encoder is not None:
             from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLRotaryEmbedding, Qwen2RMSNorm, Qwen2_5_VisionPatchEmbed, Qwen2_5_VisionRotaryEmbedding
@@ -357,6 +373,7 @@ class QwenImagePipeline(BasePipeline):
         rand_device: str = "cpu",
         # Steps
         num_inference_steps: int = 30,
+        exponential_shift_mu: float = None,
         # Blockwise ControlNet
         blockwise_controlnet_inputs: list[ControlNetInput] = None,
         # EliGen
@@ -379,7 +396,7 @@ class QwenImagePipeline(BasePipeline):
         progress_bar_cmd = tqdm,
     ):
         # Scheduler
-        self.scheduler.set_timesteps(num_inference_steps, denoising_strength=denoising_strength, dynamic_shift_len=(height // 16) * (width // 16))
+        self.scheduler.set_timesteps(num_inference_steps, denoising_strength=denoising_strength, dynamic_shift_len=(height // 16) * (width // 16), exponential_shift_mu=exponential_shift_mu)
         
         # Parameters
         inputs_posi = {
