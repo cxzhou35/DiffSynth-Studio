@@ -1,6 +1,13 @@
-__pycache__
+# dirs
+data/*
+outputs/
+logs/
+models/*
+evals/*
 
+__pycache__
 *.pyc
+*.egg-info
 *.egg-info/*
 *.DS_Store
 *.jpeg
@@ -12,7 +19,7 @@ __pycache__
 *.pts
 *.ptl
 *.pth
-
-data/
-output/
-logs/
+*.msc
+*.pkl
+*.mv
+*.bin

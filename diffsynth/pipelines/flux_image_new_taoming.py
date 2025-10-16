@@ -11,6 +11,7 @@ from PIL import Image
 from tqdm import tqdm
 from typing import Optional
 from typing_extensions import Literal
+import random
 
 from ..schedulers import FlowMatchScheduler
 from ..prompters import FluxPrompter
@@ -24,11 +25,13 @@ from ..models.flux_lora_encoder import FluxLoRAEncoder, LoRALayerBlock
 from ..models.tiler import FastTileWorker
 from ..models.nexus_gen import NexusGenAutoregressiveModel
 from ..models.nexus_gen_projector import NexusGenAdapter, NexusGenImageEmbeddingMerger
+from ..models.flux_sh_encoder import SHEncoder
 from ..utils import BasePipeline, ModelConfig, PipelineUnitRunner, PipelineUnit
 from ..lora.flux_lora import FluxLoRALoader, FluxLoraPatcher, FluxLoRAFuser
 
 from ..models.flux_dit import RMSNorm
 from ..vram_management import gradient_checkpoint_forward, enable_vram_management, AutoWrappedModule, AutoWrappedLinear
+from transformers import SiglipImageProcessor #TODO: need standardized
 
 
 
@@ -104,14 +107,20 @@ class FluxImagePipeline(BasePipeline):
         self.image_proj_model: InfiniteYouImageProjector = None
         self.lora_patcher: FluxLoraPatcher = None
         self.lora_encoder: FluxLoRAEncoder = None
+        self.redux_encoder = None
+        self.redux_embedder = None
+        self.feature_extractor = SiglipImageProcessor.from_pretrained(os.path.join(os.path.dirname(os.path.dirname(__file__)), "tokenizer_configs/flux/redux_1")) #TODO: need standardized
         self.unit_runner = PipelineUnitRunner()
         self.in_iteration_models = ("dit", "step1x_connector", "controlnet", "lora_patcher")
         self.units = [
             FluxImageUnit_ShapeChecker(),
             FluxImageUnit_NoiseInitializer(),
             FluxImageUnit_PromptEmbedder(),
+            FluxImageUnit_LightEmbedder(),
             FluxImageUnit_InputImageEmbedder(),
+            FluxImageUnit_ConditionImageEmbedder(),
             FluxImageUnit_ImageIDs(),
+            FluxImageUnit_ReduxEmbedder(),
             FluxImageUnit_EmbeddedGuidanceEmbedder(),
             FluxImageUnit_Kontext(),
             FluxImageUnit_InfiniteYou(),
@@ -395,6 +404,8 @@ class FluxImagePipeline(BasePipeline):
         pipe.vae_decoder = model_manager.fetch_model("flux_vae_decoder")
         pipe.vae_encoder = model_manager.fetch_model("flux_vae_encoder")
         pipe.prompter.fetch_models(pipe.text_encoder_1, pipe.text_encoder_2)
+        pipe.redux_encoder = model_manager.fetch_model("flux_redux_encoder")
+        pipe.redux_embedder = model_manager.fetch_model("flux_redux_embedder")
         pipe.ipadapter = model_manager.fetch_model("flux_ipadapter")
         pipe.ipadapter_image_encoder = model_manager.fetch_model("siglip_vision_model")
         pipe.qwenvl = model_manager.fetch_model("qwenvl")
@@ -434,13 +445,17 @@ class FluxImagePipeline(BasePipeline):
     def __call__(
         self,
         # Prompt
-        prompt: str,
+        prompt: str = "",
         negative_prompt: str = "",
         cfg_scale: float = 1.0,
-        embedded_guidance: float = 3.5,
+        embedded_guidance: float = 1.0,
         t5_sequence_length: int = 512,
         # Image
         input_image: Image.Image = None,
+        condition_flatlit: Image.Image = None,
+        condition_shading: Image.Image = None,
+        light_dir: torch.Tensor = None,
+        condition_mode: str = "plus",
         denoising_strength: float = 1.0,
         # Shape
         height: int = 1024,
@@ -456,6 +471,8 @@ class FluxImagePipeline(BasePipeline):
         multidiffusion_prompts=(),
         multidiffusion_masks=(),
         multidiffusion_scales=(),
+        # Redux
+        redux_images: Union[list[Image.Image], Image.Image] = None,
         # Kontext
         kontext_images: Union[list[Image.Image], Image.Image] = None,
         # ControlNet
@@ -498,20 +515,17 @@ class FluxImagePipeline(BasePipeline):
         # Scheduler
         self.scheduler.set_timesteps(num_inference_steps, denoising_strength=denoising_strength, shift=sigma_shift)
 
-        inputs_posi = {
-            "prompt": prompt,
-        }
-        inputs_nega = {
-            "negative_prompt": negative_prompt,
-        }
+        inputs_posi = {}
+        inputs_nega = {}
         inputs_shared = {
             "cfg_scale": cfg_scale, "embedded_guidance": embedded_guidance, "t5_sequence_length": t5_sequence_length,
             "input_image": input_image, "denoising_strength": denoising_strength,
+            "condition_flatlit": condition_flatlit, "condition_shading": condition_shading, "light_dir": light_dir, "condition_mode": condition_mode,
             "height": height, "width": width,
             "seed": seed, "rand_device": rand_device,
             "sigma_shift": sigma_shift, "num_inference_steps": num_inference_steps,
             "multidiffusion_prompts": multidiffusion_prompts, "multidiffusion_masks": multidiffusion_masks, "multidiffusion_scales": multidiffusion_scales,
-            "kontext_images": kontext_images,
+            "kontext_images": kontext_images, "redux_images": redux_images,
             "controlnet_inputs": controlnet_inputs,
             "ipadapter_images": ipadapter_images, "ipadapter_scale": ipadapter_scale,
             "eligen_entity_prompts": eligen_entity_prompts, "eligen_entity_masks": eligen_entity_masks, "eligen_enable_on_negative": eligen_enable_on_negative, "eligen_enable_inpaint": eligen_enable_inpaint,
@@ -567,10 +581,24 @@ class FluxImageUnit_ShapeChecker(PipelineUnit):
 
 class FluxImageUnit_NoiseInitializer(PipelineUnit):
     def __init__(self):
-        super().__init__(input_params=("height", "width", "seed", "rand_device"))
+        super().__init__(input_params=("height", "width", "seed", "rand_device", "pyramid_noise"))
 
-    def process(self, pipe: FluxImagePipeline, height, width, seed, rand_device):
-        noise = pipe.generate_noise((1, 16, height//8, width//8), seed=seed, rand_device=rand_device)
+    def process(self, pipe: FluxImagePipeline, height, width, seed, rand_device, pyramid_noise):
+        if pyramid_noise:
+            b, c, h, w = (1, 16, height//8, width//8)
+            u = torch.nn.Upsample(size=(h, w), mode='bilinear')
+            generator = None if seed is None else torch.Generator(rand_device).manual_seed(seed)
+            noise = torch.randn((b,c,h,w), generator=generator, device=rand_device, dtype=pipe.torch_dtype)
+            noise = noise.to(device=pipe.device)
+            for i in range(6):
+                r = random.random()*2+2 # Rather than always going 2x,
+                w, h = max(1, int(w/(r**i))), max(1, int(h/(r**i)))
+                noise += u(torch.randn((b,c,h,w), generator=generator, device=rand_device, dtype=pipe.torch_dtype).to(device=pipe.device)) * pyramid_noise**i
+                if w==1 or h==1:
+                    break
+            noise = noise / noise.std() # Scale back to unit variance
+        else:
+            noise = pipe.generate_noise((1, 16, height//8, width//8), seed=seed, rand_device=rand_device)
         return {"noise": noise}
 
 
@@ -596,6 +624,45 @@ class FluxImageUnit_InputImageEmbedder(PipelineUnit):
 
 
 
+class FluxImageUnit_ConditionImageEmbedder(PipelineUnit):
+    def __init__(self):
+        super().__init__(
+            input_params=("condition_flatlit", "condition_shading", "condition_mode", "tiled", "tile_size", "tile_stride"),
+            onload_model_names=("vae_encoder",)
+        )
+
+    def process(self, pipe: FluxImagePipeline, condition_flatlit, condition_shading, condition_mode, tiled, tile_size, tile_stride):
+        if condition_flatlit is None:
+            return {}
+        condition_images = [condition_flatlit]
+        if condition_shading is not None:
+            condition_images.append(condition_shading)
+        if condition_mode == "kontext":
+            return {"kontext_images": condition_images}
+        elif condition_mode == "redux":
+            return {"redux_images": condition_images}
+
+        pipe.load_models_to_device(self.onload_model_names)
+        flatlit = pipe.preprocess_image(condition_flatlit).to(device=pipe.device, dtype=pipe.torch_dtype)
+        condition_latents = pipe.vae_encoder(flatlit, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+
+        shading_latents = None
+        if condition_shading is not None:
+            shading = pipe.preprocess_image(condition_shading).to(device=pipe.device, dtype=pipe.torch_dtype)
+            shading_latents = pipe.vae_encoder(shading, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+
+        if condition_mode == "plus":
+            if shading_latents is not None:
+                condition_latents += shading_latents
+            return {"condition_plus_latents": condition_latents}
+        elif condition_mode == "concat":
+            condition_latents = [condition_latents]
+            if shading_latents is not None:
+                condition_latents.append(shading_latents)
+            return {"condition_concat_latents": condition_latents}
+
+
+
 class FluxImageUnit_PromptEmbedder(PipelineUnit):
     def __init__(self):
         super().__init__(
@@ -614,6 +681,49 @@ class FluxImageUnit_PromptEmbedder(PipelineUnit):
             return {"prompt_emb": prompt_emb, "pooled_prompt_emb": pooled_prompt_emb, "text_ids": text_ids}
         else:
             return {}
+
+
+
+class FluxImageUnit_LightEmbedder(PipelineUnit):
+    def __init__(self):
+        super().__init__(input_params=("light_dir", "t5_sequence_length"))
+
+    def process(self, pipe: FluxImagePipeline, light_dir, t5_sequence_length) -> dict:
+        if light_dir is None:
+            return {}
+        light_encoder = SHEncoder(levels=4)
+        pooled_prompt_emb = light_encoder(light_dir, 768).to(device=pipe.device, dtype=pipe.torch_dtype) # TODO
+        prompt_emb = light_encoder(light_dir, 4096).to(device=pipe.device, dtype=pipe.torch_dtype) # TODO
+        pooled_prompt_emb = repeat(pooled_prompt_emb, f"C -> B C", B=1)
+        prompt_emb = repeat(prompt_emb, f"C -> B N C", B=1, N=t5_sequence_length)
+        text_ids = torch.zeros(prompt_emb.shape[0], prompt_emb.shape[1], 3).to(device=pipe.device, dtype=pipe.torch_dtype)
+        return {"prompt_emb": prompt_emb, "pooled_prompt_emb": pooled_prompt_emb, "text_ids": text_ids}
+
+
+
+class FluxImageUnit_ReduxEmbedder(PipelineUnit):
+    def __init__(self):
+        super().__init__(
+            input_params=("redux_images", "prompt_emb"), #TODO: if no prompt before, it will be wrong
+            onload_model_names=("redux_encoder", "redux_embedder")
+        )
+
+    def process(self, pipe: FluxImagePipeline, redux_images, prompt_emb) -> dict:
+        if redux_images is None:
+            return {}
+        if pipe.redux_encoder is not None and pipe.redux_embedder is not None:
+            pipe.load_models_to_device(self.onload_model_names)
+            redux_images = self.feature_extractor.preprocess(
+                images=redux_images, do_resize=True, return_tensors="pt", do_convert_rgb=True
+            ).to(device=pipe.device, dtype=pipe.torch_dtype)
+            image_latents = pipe.redux_encoder(**redux_images).last_hidden_state
+            image_prompt_emb = pipe.redux_embedder(image_latents).image_embeds
+            image_prompt_emb = torch.sum(image_prompt_emb, dim=0, keepdim=True) #TODO: may be wrong (parameters like `scale` should be added)
+            prompt_emb = torch.cat([prompt_emb, image_prompt_emb], dim=1)
+        text_ids = torch.zeros(prompt_emb.shape[0], prompt_emb.shape[1], 3).to(device=pipe.device, dtype=pipe.torch_dtype)
+
+        return {"prompt_emb": prompt_emb, "text_ids": text_ids}
+
 
 
 class FluxImageUnit_ImageIDs(PipelineUnit):
@@ -1116,6 +1226,8 @@ def model_fn_flux_image(
     guidance=None,
     text_ids=None,
     image_ids=None,
+    condition_plus_latents=None,
+    condition_concat_latents=None,
     kontext_latents=None,
     kontext_image_ids=None,
     controlnet_inputs=None,
@@ -1216,6 +1328,14 @@ def model_fn_flux_image(
 
     height, width = hidden_states.shape[-2:]
     hidden_states = dit.patchify(hidden_states)
+
+    # Flat-lit and Shading condition
+    if condition_plus_latents is not None:
+        condition_plus_latents = dit.patchify(condition_plus_latents)
+        hidden_states += condition_plus_latents
+    elif condition_concat_latents is not None:
+        condition_concat_latents = [dit.patchify(condition) for condition in condition_concat_latents]
+        hidden_states = torch.concat([hidden_states, *condition_concat_latents], dim=-1)
 
     # Kontext
     if kontext_latents is not None:
