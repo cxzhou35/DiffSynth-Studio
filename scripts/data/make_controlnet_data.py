@@ -1,8 +1,8 @@
 import os
-import argparse
-import sys
 import csv
+import argparse
 from tqdm import tqdm
+from easyvolcap.utils.console_utils import log
 
 BATCH_ITEMS=['image', 'prompt', 'controlnet_image']
 
@@ -31,7 +31,7 @@ def construct_controlnet_data(image_dir: str, controlnet_image_dir: str, output_
     controlnet_image_dir_format = check_dir_format(controlnet_image_dir)
     assert input_image_dir_format == controlnet_image_dir_format, f"Input image directory format and controlnet image directory format must be the same"
 
-    output_csv_path = os.path.join(output_dir, "metadata_controlnet_upscale_data.csv")
+    output_csv_path = os.path.join(output_dir, "metadata.csv")
 
     # create output metadata file
     with open(output_csv_path, "w", newline='') as f:
@@ -44,7 +44,7 @@ def construct_controlnet_data(image_dir: str, controlnet_image_dir: str, output_
     # NOTE: data format: evc image_dir/view_dir/image
     if input_image_dir_format == "evc":
         view_dirs = sorted(os.listdir(image_dir))
-        print(f"Found {len(view_dirs)} views in {image_dir}")
+        log(f"Found {len(view_dirs)} views in {image_dir}")
         for view_dir in view_dirs:
             input_image_view_dir = os.path.join(image_dir, view_dir)
             controlnet_image_view_dir = os.path.join(controlnet_image_dir, view_dir)
@@ -83,8 +83,8 @@ def main():
 
     os.makedirs(output_dir, exist_ok=True)
     output_csv_path, total_pair_num = construct_controlnet_data(image_dir, controlnet_image_dir, output_dir, prompt)
-    print(f"Constructed {total_pair_num} controlnet data pairs.")
-    print(f"Saved the metadata file to {output_csv_path}")
+    log(f"Constructed {total_pair_num} controlnet data pairs.")
+    log(f"Saved the metadata file to {output_csv_path}")
 
 
 if __name__ == "__main__":

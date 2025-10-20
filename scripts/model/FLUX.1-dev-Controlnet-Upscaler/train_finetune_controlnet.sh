@@ -1,14 +1,11 @@
 #! /bin/bash
-export NUM_NODES=1
-export NUM_GPUS=1
-export CUDA_VISIBLE_DEVICES="0,"
 
-export NCCL_DEBUG=INFO
-export CUDA_LAUNCH_BLOCKING=1
+export NUM_NODES=1
+export NUM_GPUS=4
 
 DATASET_BASE_PATH="/workspace/codes/DiffSynth-Studio/data/neemo_mini_1440p_120f/controlnet_data"
 DATASET_METADATA_PATH="${DATASET_BASE_PATH}/metadata.csv"
-OUTPUT_PATH="/workspace/codes/DiffSynth-Studio/outputs/neemo_mini_1440p_120f/train_finetune_controlnet_debug/models/FLUX.1-dev-Controlnet-Upscaler_controlnet"
+OUTPUT_PATH="/workspace/codes/DiffSynth-Studio/outputs/neemo_mini_1440p_120f/train_finetune_controlnet/models/FLUX.1-dev-Controlnet-Upscaler_controlnet"
 # MAX_PIXELS=3686400 # 2560x1440
 IMG_HEIGHT=1440
 IMG_WIDTH=2560
@@ -19,7 +16,7 @@ NUM_EPOCHS=5
 #   --width $IMG_WIDTH \
 #   --max_pixels $MAX_PIXELS \
 
-accelerate launch --mixed_precision=bf16 --config_file examples/flux/model_training/full/accelerate_config.yaml examples/flux/model_training/train.py \
+accelerate launch --mixed_precision=bf16 --multi_gpu --main_process_port 29501 --num_machines $NUM_NODES --num_processes $NUM_GPUS --config_file examples/flux/model_training/full/accelerate_config.yaml examples/flux/model_training/train.py \
   --dataset_base_path $DATASET_BASE_PATH \
   --dataset_metadata_path $DATASET_METADATA_PATH \
   --data_file_keys "image,controlnet_image" \
@@ -34,3 +31,4 @@ accelerate launch --mixed_precision=bf16 --config_file examples/flux/model_train
   --trainable_models "controlnet" \
   --extra_inputs "controlnet_image" \
   --use_gradient_checkpointing \
+  --find_unused_parameters
