@@ -13,6 +13,7 @@ diffsynth/controlnets/__init__.py
 diffsynth/controlnets/controlnet_unit.py
 diffsynth/controlnets/processors.py
 diffsynth/data/__init__.py
+diffsynth/data/evc_data.py
 diffsynth/data/simple_text_image.py
 diffsynth/data/video.py
 diffsynth/distributed/__init__.py
@@ -236,8 +237,12 @@ diffsynth/tokenizer_configs/stable_diffusion_xl/tokenizer_2/tokenizer_config.jso
 diffsynth/tokenizer_configs/stable_diffusion_xl/tokenizer_2/vocab.json
 diffsynth/trainers/__init__.py
 diffsynth/trainers/text_to_image.py
+diffsynth/trainers/unified_dataset.py
 diffsynth/trainers/utils.py
+diffsynth/trainers/utils_back.py
 diffsynth/utils/__init__.py
+diffsynth/utils/evc/__init__.py
+diffsynth/utils/evc/data_utils.py
 diffsynth/vram_management/__init__.py
 diffsynth/vram_management/gradient_checkpointing.py
 diffsynth/vram_management/layers.py

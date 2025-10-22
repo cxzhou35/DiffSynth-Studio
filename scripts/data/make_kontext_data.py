@@ -30,7 +30,7 @@ def construct_kontext_data(image_dir: str, kontext_image_dir: str, output_dir: s
     kontext_image_dir_format = check_dir_format(kontext_image_dir)
     assert input_image_dir_format == kontext_image_dir_format, f"Input image directory format and kontext image directory format must be the same"
 
-    output_csv_path = os.path.join(output_dir, "metadata_kontext_data.csv")
+    output_csv_path = os.path.join(output_dir, "metadata.csv")
 
     # create output metadata file
     with open(output_csv_path, "w", newline='') as f:

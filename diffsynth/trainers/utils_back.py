@@ -4,9 +4,10 @@ from ..models.utils import load_state_dict
 from peft import LoraConfig, inject_adapter_in_model
 from PIL import Image
 import pandas as pd
+import shutil
 from tqdm import tqdm
 from accelerate import Accelerator
-from accelerate.utils import DistributedDataParallelKwargs
+from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration
 
 
 
@@ -403,8 +404,9 @@ class DiffusionTrainingModule(torch.nn.Module):
             if "lora_A.weight" in key or "lora_B.weight" in key:
                 new_key = key.replace("lora_A.weight", "lora_A.default.weight").replace("lora_B.weight", "lora_B.default.weight")
                 new_state_dict[new_key] = value
-            elif "lora_A.default.weight" in key or "lora_B.default.weight" in key:
-                new_state_dict[key] = value
+            # TODO: check if this is needed
+            # elif "lora_A.default.weight" in key or "lora_B.default.weight" in key:
+            #     new_state_dict[key] = value
         return new_state_dict
 
 
@@ -529,7 +531,13 @@ def launch_training_task(
     num_epochs: int = 1,
     gradient_accumulation_steps: int = 1,
     find_unused_parameters: bool = False,
-    args = None,
+    output_dir: str = None,
+    logging_dir: str = None,
+    mixed_precision: str = None,
+    report_to: str = None,
+    tracker_config: dict = None,
+    load_from_latest: bool = False,
+    args=None,
 ):
     if args is not None:
         learning_rate = args.learning_rate
@@ -543,14 +551,38 @@ def launch_training_task(
     optimizer = torch.optim.AdamW(model.trainable_modules(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer)
     dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=num_workers)
+    # NOTE: set the project configuration
+    accelerator_project_config = ProjectConfiguration(project_dir=output_dir, logging_dir=logging_dir)
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
+        mixed_precision=mixed_precision,
+        log_with=report_to,
+        project_config=accelerator_project_config,
         kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=find_unused_parameters)],
     )
     model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, dataloader, scheduler)
+    if accelerator.is_main_process:
+        accelerator.init_trackers("train_ver0", tracker_config) # TODO: change the tracker name
 
-    for epoch_id in range(num_epochs):
-        for data in tqdm(dataloader):
+    init_epoch = 0
+    if load_from_latest and os.path.exists(os.path.join(output_dir, "checkpoint")):
+        dirs = os.listdir(os.path.join(output_dir, "checkpoint"))
+        epoch_dirs = [d for d in dirs if "epoch" in d]
+        dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
+        epoch_dirs = sorted(epoch_dirs, key=lambda x: int(x.split("-")[-1]))
+        path = dirs[-1] if len(dirs) > 0 else None
+        if path is not None:
+            accelerator.print(f"Resuming from checkpoint {path}")
+            accelerator.load_state(os.path.join(output_dir, "checkpoint", path))
+            global_step = int(path.split("-")[1])
+
+            model_logger.num_steps = global_step
+            init_epoch = int(epoch_dirs[-1].split("-")[-1]) + 1 if len(epoch_dirs) > 0 else init_epoch
+
+    for epoch_id in range(init_epoch, num_epochs):
+        dl_dataloader = tqdm(dataloader, desc="Training Steps", disable=not accelerator.is_local_main_process)
+        for data in dl_dataloader:
+            train_loss = 0.0
             with accelerator.accumulate(model):
                 optimizer.zero_grad()
                 if dataset.load_from_cache:
@@ -559,11 +591,21 @@ def launch_training_task(
                     loss = model(data)
                 accelerator.backward(loss)
                 optimizer.step()
-                model_logger.on_step_end(accelerator, model, save_steps)
                 scheduler.step()
-        if save_steps is None:
-            model_logger.on_epoch_end(accelerator, model, epoch_id)
+
+                # TODO: get the losses across all processes for logging (if we use distributed training).
+                # train_loss += loss.item() / gradient_accumulation_steps
+                avg_loss = accelerator.gather(loss.repeat(1)).mean()
+                train_loss += avg_loss.item() / gradient_accumulation_steps
+            if accelerator.sync_gradients:
+                model_logger.on_step_end(accelerator, model, save_steps)
+                accelerator.log({"train_loss": train_loss}, step=model_logger.num_steps)
+                logs = {"step_loss": train_loss, "epoch": epoch_id}
+                dl_dataloader.set_postfix(**logs)
+        model_logger.on_epoch_end(accelerator, model, epoch_id)
     model_logger.on_training_end(accelerator, model, save_steps)
+
+    accelerator.end_training()
 
 
 def launch_data_process_task(
@@ -679,6 +721,7 @@ def qwen_image_parser():
     parser.add_argument("--lora_target_modules", type=str, default="q,k,v,o,ffn.0,ffn.2", help="Which layers LoRA is added to.")
     parser.add_argument("--lora_rank", type=int, default=32, help="Rank of LoRA.")
     parser.add_argument("--lora_checkpoint", type=str, default=None, help="Path to the LoRA checkpoint. If provided, LoRA will be loaded from this checkpoint.")
+    parser.add_argument("--resume_from_checkpoint", default=False, action="store_true", help="Whether to use pretrained checkpoint.")
     parser.add_argument("--extra_inputs", default=None, help="Additional model inputs, comma-separated.")
     parser.add_argument("--use_gradient_checkpointing", default=False, action="store_true", help="Whether to use gradient checkpointing.")
     parser.add_argument("--use_gradient_checkpointing_offload", default=False, action="store_true", help="Whether to offload gradient checkpointing to CPU memory.")

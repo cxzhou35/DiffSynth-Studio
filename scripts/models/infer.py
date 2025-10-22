@@ -16,6 +16,7 @@ def parse_args():
     parser.add_argument("--ckpt_path", type=str, default="models/train/FLUX.1-dev-Controlnet-Upscaler_lora/epoch-4.safetensors")
     parser.add_argument("--output_dir", type=str, default="inference")
     parser.add_argument("--save_video", action="store_true", help="Whether save video")
+    parser.add_argument("--video_path", type=str)
     parser.add_argument("--fps", type=int, default=60, help="FPS of video")
     return parser.parse_args()
 
@@ -28,6 +29,8 @@ def main(args):
     ckpt_path = args.ckpt_path
     output_dir = args.output_dir
     fps = args.fps
+    save_video = args.save_video
+    video_path = args.video_path
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -50,10 +53,10 @@ def main(args):
     else:
         control_image_paths = [control_image]
 
-    if args.save_video:
-        video_save_dir = os.path.join(output_dir, 'videos')
-        os.makedirs(video_save_dir, exist_ok=True)
-        video_writer = cv2.VideoWriter(os.path.join(video_save_dir, f'video_{fps:02d}.mp4'), cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
+    video_writer = None
+    if save_video and video_path is not None:
+        os.makedirs(os.path.dirname(video_path), exist_ok=True)
+        video_writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
 
     for image_path in tqdm(control_image_paths, desc="Inferring with Flux.1-dev-Controlnet-Upscaler", total=len(control_image_paths)):
         control_image = Image.open(image_path)
@@ -75,10 +78,10 @@ def main(args):
         save_path = os.path.join(output_dir, os.path.basename(image_path))
         print(f"Save result to {save_path}")
         image.save(save_path)
-        if args.save_video:
+        if video_writer is not None:
             video_writer.write(cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR))
 
-    if args.save_video:
+    if video_writer is not None:
         video_writer.release()
 
 if __name__ == "__main__":

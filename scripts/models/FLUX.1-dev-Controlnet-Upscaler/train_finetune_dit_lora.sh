@@ -3,16 +3,16 @@
 export NUM_NODES=1
 export NUM_GPUS=4
 
-DATASET_BASE_PATH="/workspace/codes/DiffSynth-Studio/data/neemo_mini_1440p_120f/controlnet_data"
+DATASET_BASE_PATH="data/neemo_mini_1440p_120f/controlnet_data"
 DATASET_METADATA_PATH="${DATASET_BASE_PATH}/metadata.csv"
-OUTPUT_PATH="/workspace/codes/DiffSynth-Studio/outputs/neemo_mini_1440p_120f/train_finetune_dit_lora/models/FLUX.1-dev-Controlnet-Upscaler_lora"
+OUTPUT_PATH="outputs/neemo_mini_1440p_120f/train_finetune_dit_lora/models/FLUX.1-dev-Controlnet-Upscaler_lora"
 # MAX_PIXELS=3686400 # 2560x1440
 IMG_HEIGHT=1440
 IMG_WIDTH=2560
 DATASET_REPEAT=10
 NUM_EPOCHS=5
 
-accelerate launch --mixed_precision=bf16 --multi_gpu --main_process_port 29501 --num_machines $NUM_NODES --num_processes $NUM_GPUS --config_file examples/flux/model_training/full/accelerate_config.yaml examples/flux/model_training/train.py \
+accelerate launch --mixed_precision=bf16 --multi_gpu --main_process_port 29501 --num_machines $NUM_NODES --num_processes $NUM_GPUS scripts/model/train.py \
   --dataset_base_path $DATASET_BASE_PATH \
   --dataset_metadata_path $DATASET_METADATA_PATH \
   --data_file_keys "image,controlnet_image" \
