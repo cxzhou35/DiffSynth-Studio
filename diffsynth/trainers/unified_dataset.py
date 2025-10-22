@@ -225,6 +225,13 @@ class ToAbsolutePath(DataProcessingOperator):
     def __call__(self, data):
         return os.path.join(self.base_path, data)
 
+class LoadAudio(DataProcessingOperator):
+    def __init__(self, sr=16000):
+        self.sr = sr
+    def __call__(self, data: str):
+        import librosa
+        input_audio, sample_rate = librosa.load(data, sr=self.sr)
+        return input_audio
 
 
 class UnifiedDataset(torch.utils.data.Dataset):
@@ -269,7 +276,10 @@ class UnifiedDataset(torch.utils.data.Dataset):
         return RouteByType(operator_map=[
             (str, ToAbsolutePath(base_path) >> RouteByExtensionName(operator_map=[
                 (("jpg", "jpeg", "png", "webp"), LoadImage() >> ImageCropAndResize(height, width, max_pixels, height_division_factor, width_division_factor) >> ToList()),
-                (("gif",), LoadGIF(num_frames, time_division_factor, time_division_remainder) >> ImageCropAndResize(height, width, max_pixels, height_division_factor, width_division_factor)),
+                (("gif",), LoadGIF(
+                    num_frames, time_division_factor, time_division_remainder,
+                    frame_processor=ImageCropAndResize(height, width, max_pixels, height_division_factor, width_division_factor),
+                )),
                 (("mp4", "avi", "mov", "wmv", "mkv", "flv", "webm"), LoadVideo(
                     num_frames, time_division_factor, time_division_remainder,
                     frame_processor=ImageCropAndResize(height, width, max_pixels, height_division_factor, width_division_factor),
@@ -313,7 +323,7 @@ class UnifiedDataset(torch.utils.data.Dataset):
             for key in self.data_file_keys:
                 if key in data:
                     if key in self.special_operator_map:
-                        data[key] = self.special_operator_map[key]
+                        data[key] = self.special_operator_map[key](data[key])
                     elif key in self.data_file_keys:
                         data[key] = self.main_data_operator(data[key])
         return data
