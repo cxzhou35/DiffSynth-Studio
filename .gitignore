@@ -1,0 +1,25 @@
+# dirs
+data/*
+outputs/
+logs/
+models/*
+evals/*
+
+__pycache__
+*.pyc
+.egg-info
+*.egg-info/*
+*.DS_Store
+*.jpeg
+*.jpg
+*.png
+*.mp4
+*.safetensors
+*.ckpt
+*.pts
+*.ptl
+*.pth
+*.msc
+*.pkl
+*.mv
+*.bin
