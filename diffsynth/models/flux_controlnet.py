@@ -20,7 +20,7 @@ class FluxControlNet(torch.nn.Module):
 
         self.controlnet_blocks = torch.nn.ModuleList([torch.nn.Linear(3072, 3072) for _ in range(num_joint_blocks)])
         self.controlnet_single_blocks = torch.nn.ModuleList([torch.nn.Linear(3072, 3072) for _ in range(num_single_blocks)])
-        
+
         self.mode_dict = mode_dict
         self.controlnet_mode_embedder = torch.nn.Embedding(num_mode, 3072) if len(mode_dict) > 0 else None
         self.controlnet_x_embedder = torch.nn.Linear(64 + additional_input_dim, 3072)
@@ -41,12 +41,12 @@ class FluxControlNet(torch.nn.Module):
         latent_image_ids = latent_image_ids.to(device=latents.device, dtype=latents.dtype)
 
         return latent_image_ids
-    
+
 
     def patchify(self, hidden_states):
         hidden_states = rearrange(hidden_states, "B C (H P) (W Q) -> B (H W) (C P Q)", P=2, Q=2)
         return hidden_states
-    
+
 
     def align_res_stack_to_original_blocks(self, res_stack, num_blocks, hidden_states):
         if len(res_stack) == 0:
@@ -105,7 +105,7 @@ class FluxControlNet(torch.nn.Module):
     @staticmethod
     def state_dict_converter():
         return FluxControlNetStateDictConverter()
-    
+
     def quantize(self):
         def cast_to(weight, dtype=None, device=None, copy=False):
             if device is None or weight.device == device:
@@ -144,16 +144,16 @@ class FluxControlNet(torch.nn.Module):
             class QLinear(torch.nn.Linear):
                 def __init__(self, *args, **kwargs):
                     super().__init__(*args, **kwargs)
-                    
+
                 def forward(self,input,**kwargs):
                     weight,bias= cast_bias_weight(self,input)
                     return torch.nn.functional.linear(input,weight,bias)
-            
+
             class QRMSNorm(torch.nn.Module):
                 def __init__(self, module):
                     super().__init__()
                     self.module = module
-                    
+
                 def forward(self,hidden_states,**kwargs):
                     weight= cast_weight(self.module,hidden_states)
                     input_dtype = hidden_states.dtype
@@ -161,17 +161,17 @@ class FluxControlNet(torch.nn.Module):
                     hidden_states = hidden_states * torch.rsqrt(variance + self.module.eps)
                     hidden_states = hidden_states.to(input_dtype) * weight
                     return hidden_states
-            
+
             class QEmbedding(torch.nn.Embedding):
                 def __init__(self, *args, **kwargs):
                     super().__init__(*args, **kwargs)
-                    
+
                 def forward(self,input,**kwargs):
                     weight= cast_weight(self,input)
                     return torch.nn.functional.embedding(
                         input, weight, self.padding_idx, self.max_norm,
                         self.norm_type, self.scale_grad_by_freq, self.sparse)
-            
+
         def replace_layer(model):
             for name, module in model.named_children():
                 if isinstance(module,quantized_layer.QRMSNorm):
@@ -206,7 +206,7 @@ class FluxControlNet(torch.nn.Module):
                     replace_layer(module)
 
         replace_layer(self)
-    
+
 
 
 class FluxControlNetStateDictConverter:
@@ -325,7 +325,7 @@ class FluxControlNetStateDictConverter:
         else:
             extra_kwargs = {}
         return state_dict_, extra_kwargs
-    
+
 
     def from_civitai(self, state_dict):
         return self.from_diffusers(state_dict)

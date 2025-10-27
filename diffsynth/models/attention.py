@@ -60,7 +60,7 @@ class Attention(torch.nn.Module):
         hidden_states = self.to_out(hidden_states)
 
         return hidden_states
-    
+
     def xformers_forward(self, hidden_states, encoder_hidden_states=None, attn_mask=None):
         if encoder_hidden_states is None:
             encoder_hidden_states = hidden_states
@@ -87,3 +87,27 @@ class Attention(torch.nn.Module):
 
     def forward(self, hidden_states, encoder_hidden_states=None, attn_mask=None, ipadapter_kwargs=None, qkv_preprocessor=None):
         return self.torch_forward(hidden_states, encoder_hidden_states=encoder_hidden_states, attn_mask=attn_mask, ipadapter_kwargs=ipadapter_kwargs, qkv_preprocessor=qkv_preprocessor)
+
+
+class MultiViewAttention(Attention):
+    """
+    A multiview attention block
+    """
+    def __init__(self, num_views, q_dim, num_heads, head_dim, kv_dim=None, bias_q=False, bias_kv=False, bias_out=False):
+        super().__init__()
+
+
+class TemporalAttention(Attention):
+    """
+    A temporal attention block
+    """
+    def __init__(self, num_frames, q_dim, num_heads, head_dim, kv_dim=None, bias_q=False, bias_kv=False, bias_out=False):
+        super().__init__()
+
+
+class MultiViewTransformerBlock(torch.nn.Module):
+    pass
+
+
+class TemporalTransformerBlock(torch.nn.Module):
+    pass

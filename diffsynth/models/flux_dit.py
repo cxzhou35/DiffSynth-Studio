@@ -290,7 +290,7 @@ class FluxDiT(torch.nn.Module):
 
         self.final_norm_out = AdaLayerNormContinuous(3072)
         self.final_proj_out = torch.nn.Linear(3072, 64)
-        
+
         self.input_dim = input_dim
 
 
