@@ -4,9 +4,10 @@ from diffsynth.pipelines.flux_image_new import FluxImagePipeline, ModelConfig, C
 from diffsynth.trainers.utils import DiffusionTrainingModule, ModelLogger, launch_training_task, flux_parser
 from diffsynth.models.lora import FluxLoRAConverter
 from diffsynth.trainers.unified_dataset import UnifiedDataset
+
+from diffsynth.models.flux_vae_al import wrap_vae_with_al
 from easyvolcap.utils.console_utils import *
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
 
 class FluxTrainingModule(DiffusionTrainingModule):
     def __init__(
@@ -17,6 +18,8 @@ class FluxTrainingModule(DiffusionTrainingModule):
         use_gradient_checkpointing=True,
         use_gradient_checkpointing_offload=False,
         extra_inputs=None,
+        use_al_vae=False,
+        use_al_dit=False,
     ):
         super().__init__()
         # Load models
@@ -29,6 +32,14 @@ class FluxTrainingModule(DiffusionTrainingModule):
             lora_base_model, lora_target_modules, lora_rank, lora_checkpoint=lora_checkpoint,
             enable_fp8_training=False,
         )
+
+        # Enable anti-aliased components in pipeline
+        if use_al_vae:
+            wrap_vae_with_al(self.pipe.vae_encoder, self.pipe.vae_decoder)
+
+        if use_al_dit:
+            assert False, "Anti-aliased DIT is not yet supported."
+            # self.pipe.enable_al_dit = use_al_dit
 
         # Store other configs
         self.use_gradient_checkpointing = use_gradient_checkpointing
@@ -113,6 +124,8 @@ def main():
         use_gradient_checkpointing=args.use_gradient_checkpointing,
         use_gradient_checkpointing_offload=args.use_gradient_checkpointing_offload,
         extra_inputs=args.extra_inputs,
+        use_al_vae=args.use_al_vae,
+        use_al_dit=args.use_al_dit,
     )
 
     # set logger

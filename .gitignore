@@ -8,6 +8,7 @@ evals/*
 __pycache__
 *.pyc
 .egg-info
+*.egg*
 *.egg-info/*
 *.DS_Store
 *.jpeg
