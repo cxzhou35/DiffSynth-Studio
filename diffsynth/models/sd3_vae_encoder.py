@@ -53,7 +53,7 @@ class SD3VAEEncoder(torch.nn.Module):
         # For VAE Decoder, we do not need to apply the tiler on each layer.
         if tiled:
             return self.tiled_forward(sample, tile_size=tile_size, tile_stride=tile_stride)
-        
+
         # 1. pre-process
         hidden_states = self.conv_in(sample)
         time_emb = None
@@ -63,7 +63,7 @@ class SD3VAEEncoder(torch.nn.Module):
         # 2. blocks
         for i, block in enumerate(self.blocks):
             hidden_states, time_emb, text_emb, res_stack = block(hidden_states, time_emb, text_emb, res_stack)
-        
+
         # 3. output
         hidden_states = self.conv_norm_out(hidden_states)
         hidden_states = self.conv_act(hidden_states)
@@ -72,7 +72,7 @@ class SD3VAEEncoder(torch.nn.Module):
         hidden_states = (hidden_states - self.shift_factor) * self.scaling_factor
 
         return hidden_states
-    
+
     def encode_video(self, sample, batch_size=8):
         B = sample.shape[0]
         hidden_states = []
@@ -86,10 +86,10 @@ class SD3VAEEncoder(torch.nn.Module):
             hidden_states_batch = rearrange(hidden_states_batch, "(B T) C H W -> B C T H W", B=B)
 
             hidden_states.append(hidden_states_batch)
-        
+
         hidden_states = torch.concat(hidden_states, dim=2)
         return hidden_states
-    
+
     @staticmethod
     def state_dict_converter():
         return SDVAEEncoderStateDictConverter()

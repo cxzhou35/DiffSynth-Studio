@@ -18,6 +18,22 @@ def create_lpf_rect(N, cutoff=0.5):
     rect_2d = rect_1d[:, None] * rect_1d[None, :]
     return rect_2d
 
+# support not square inputs
+def create_lpf_rect_hw(H, W, cutoff=0.5):
+    rects = []
+    for dim_size in [H, W]:
+        cutoff_low = int((dim_size * cutoff) // 2)
+        cutoff_high = int(dim_size - cutoff_low)
+        rect = torch.ones(dim_size)
+        rect[cutoff_low + 1:cutoff_high] = 0
+        if dim_size % 4 == 0:
+            # if N is divides by 4, nyquist freq should be 0
+            # N % 4 =0 means the downsampeled signal is even
+            rect[cutoff_low] = 0
+            rect[cutoff_high] = 0
+        rects.append(rect)
+    rect_2d = rects[0][:, None] * rects[1][None, :]
+    return rect_2d
 
 def create_fixed_lpf_rect(N, size):
     rect_1d = torch.ones(N)
@@ -28,6 +44,17 @@ def create_fixed_lpf_rect(N, size):
     rect_2d = rect_1d[:, None] * rect_1d[None, :]
     return rect_2d
 
+def create_fixed_lpf_rect_hw(H, W, size):
+    rects = []
+    for dim_size in [H, W]:
+        rect = torch.ones(dim_size)
+        if size < dim_size:
+            cutoff_low = size // 2
+            cutoff_high = int(dim_size - cutoff_low)
+            rect[cutoff_low + 1:cutoff_high] = 0
+        rects.append(rect)
+    rect_2d = rects[0][:, None] * rects[1][None, :]
+    return rect_2d
 
 # upsample using FFT
 def create_recon_rect(N, cutoff=0.5):
@@ -41,6 +68,23 @@ def create_recon_rect(N, cutoff=0.5):
         rect_1d[cutoff_low] = 0.5
         rect_1d[cutoff_high] = 0.5
     rect_2d = rect_1d[:, None] * rect_1d[None, :]
+    return rect_2d
+
+def create_recon_rect_hw(H, W, cutoff=0.5):
+    rects = []
+    for dim_size in [H, W]:
+        cutoff_low = int((dim_size * cutoff) // 2)
+        cutoff_high = int(dim_size - cutoff_low)
+        rect = torch.ones(dim_size)
+        rect[cutoff_low + 1:cutoff_high] = 0
+        if dim_size % 4 == 0:
+            # if N is divides by 4, nyquist freq should be 0.5
+            # N % 4 = 0 means the downsampeled signal is even
+            rect[cutoff_low] = 0.5
+            rect[cutoff_high] = 0.5
+        rects.append(rect)
+
+    rect_2d = rects[0][:, None] * rects[1][None, :]
     return rect_2d
 
 
@@ -62,28 +106,24 @@ class LPF_RFFT(nn.Module):
             x))) if transform_mode == 'fft' else torch.fft.irfft2
 
     def forward(self, x):
+        orig_dtype = x.dtype
+        if orig_dtype in (torch.float16, torch.bfloat16):
+            x = x.to(torch.float32)
         x_fft = self.transform(x)
-        # if not hasattr(self, 'rect'):
-        #     N = x.shape[-1]
-        #     rect = create_lpf_rect(
-        #         N, self.cutoff) if not self.fixed_size else create_fixed_lpf_rect(N, self.fixed_size)
-        #     rect = rect[:, :int(
-        #         N/2+1)] if self.transform_mode == 'rfft' else rect
-        #     self.register_buffer('rect', rect, persistent=False)
-        #     self.to(x.device)
-
-        N = x.shape[-1]
-        if N in self.rect_dict:
-            rect = self.rect_dict[N]
+        # Build a separable 2D rectangle mask that matches the FFT output shape:
+        # (H, W) for fft2, or (H, W/2+1) for rfft2
+        B, C, H, W = x.shape
+        key = (H, W, self.transform_mode)
+        if key in self.rect_dict:
+            rect = self.rect_dict[key].to(x.device)
         else:
-            rect = create_lpf_rect(N, self.cutoff)
-            rect = rect[:, :int(
-                N/2+1)] if self.transform_mode == 'rfft' else rect
+            rect = create_lpf_rect_hw(H, W, self.cutoff)
+            rect = rect[:, :int(W/2+1)] if self.transform_mode == 'rfft' else rect
             rect = rect.to(x.device)
-            self.rect_dict[N] = rect
-        x_fft *= rect
-        # out = self.itransform(x_fft) # support odd inputs - need to specify signal size (irfft default is even)
-        out = self.itransform(x_fft, s=(x.shape[-2], x.shape[-1]))
+            self.rect_dict[key] = rect
+        x_fft *= rect.to(x_fft.dtype)
+        out = self.itransform(x_fft, s=(H, W))
+        out = out.to(orig_dtype)
 
         return out
 
@@ -105,27 +145,22 @@ class LPF_RECON_RFFT(nn.Module):
             x))) if transform_mode == 'fft' else torch.fft.irfft2
 
     def forward(self, x):
+        orig_dtype = x.dtype
+        if orig_dtype in (torch.float16, torch.bfloat16):
+            x = x.to(torch.float32)
         x_fft = self.transform(x)
-        N = x.shape[-1]
-        if N in self.rect_dict:
-            rect = self.rect_dict[N].to(x.device)
+        B, C, H, W = x.shape
+        key = (H, W, self.transform_mode)
+        if key in self.rect_dict:
+            rect = self.rect_dict[key].to(x.device)
         else:
-            rect = create_recon_rect(N, self.cutoff)
-            rect = rect[:, :int(N / 2 + 1)
-                        ] if self.transform_mode == 'rfft' else rect
+            rect = create_recon_rect_hw(H, W, self.cutoff)
+            rect = rect[:, :int(W/2+1)] if self.transform_mode == 'rfft' else rect
             rect = rect.to(x.device)
-            self.rect_dict[N] = rect
-            # self.register_buffer('rect', rect, persistent=False)
-            # self.to(x.device)
-        # if not hasattr(self, 'rect'):
-        #     N = x.shape[-1]
-        #     rect = create_recon_rect(N, self.cutoff)
-        #     rect = rect[:, :int(N / 2 + 1)
-        #                 ] if self.transform_mode == 'rfft' else rect
-        #     self.register_buffer('rect', rect, persistent=False)
-        #     self.to(x.device)
-        x_fft *= rect
-        out = self.itransform(x_fft)
+            self.rect_dict[key] = rect
+        x_fft *= rect.to(x_fft.dtype)
+        out = self.itransform(x_fft, s=(H, W))
+        out = out.to(orig_dtype)
         return out
 
 
@@ -136,20 +171,17 @@ class UpsampleRFFT(nn.Module):
 
     def __init__(self, up=2, transform_mode='rfft', factor=1):
         super(UpsampleRFFT, self).__init__()
-        self.up = up
+        self.up_scale = up
         self.recon_filter = LPF_RECON_RFFT(
             cutoff=1 / up * factor, transform_mode=transform_mode)
 
     def forward(self, x):
         # pad zeros
-        batch_size, num_channels, in_height, in_width = x.shape
-        x = x.reshape([batch_size, num_channels, in_height, 1, in_width, 1])
-        # x = x.repeat([1, 1, 1, self.up, 1, self.up])
-        x = torch.nn.functional.pad(x, [0, self.up - 1, 0, 0, 0, self.up - 1])
-        x = x.reshape([batch_size, num_channels, in_height *
-                      self.up, in_width * self.up])
-        x = self.recon_filter(x) * (self.up ** 2)
-        # x = torch.roll(x, [1, 1], dims=[-2, -1])
+        B, C, H, W = x.shape
+        x = x.reshape([B, C, H, 1, W, 1])
+        x = torch.nn.functional.pad(x, [0, self.up_scale-1, 0, 0, 0, self.up_scale-1])
+        x = x.reshape([B, C, H*self.up_scale, W*self.up_scale])
+        x = self.recon_filter(x) * (self.up_scale ** 2)
         return x
 
 

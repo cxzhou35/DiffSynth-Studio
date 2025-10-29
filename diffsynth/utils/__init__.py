@@ -28,8 +28,8 @@ class BasePipeline(torch.nn.Module):
         self.time_division_factor = time_division_factor
         self.time_division_remainder = time_division_remainder
         self.vram_management_enabled = False
-        
-        
+
+
     def to(self, *args, **kwargs):
         device, dtype, non_blocking, convert_to_format = torch._C._nn._parse_to(*args, **kwargs)
         if device is not None:
@@ -125,12 +125,12 @@ class BasePipeline(torch.nn.Module):
     def enable_cpu_offload(self):
         warnings.warn("`enable_cpu_offload` will be deprecated. Please use `enable_vram_management`.")
         self.vram_management_enabled = True
-        
-        
+
+
     def get_vram(self):
         return torch.cuda.mem_get_info(self.device)[1] / (1024 ** 3)
-    
-    
+
+
     def freeze_except(self, model_names):
         for name, model in self.named_children():
             if name in model_names:
@@ -139,12 +139,12 @@ class BasePipeline(torch.nn.Module):
             else:
                 model.eval()
                 model.requires_grad_(False)
-                
-    
+
+
     def blend_with_mask(self, base, addition, mask):
         return base * (1 - mask) + addition * mask
-    
-    
+
+
     def step(self, scheduler, latents, progress_id, noise_pred, input_latents=None, inpaint_mask=None, **kwargs):
         timestep = scheduler.timesteps[progress_id]
         if inpaint_mask is not None:
@@ -171,14 +171,14 @@ class ModelConfig:
             # Check model_id and origin_file_pattern
             if self.model_id is None:
                 raise ValueError(f"""No valid model files. Please use `ModelConfig(path="xxx")` or `ModelConfig(model_id="xxx/yyy", origin_file_pattern="zzz")`.""")
-            
+
             # Skip if not in rank 0
             if use_usp:
                 import torch.distributed as dist
                 skip_download = self.skip_download or dist.get_rank() != 0
             else:
                 skip_download = self.skip_download
-                
+
             # Check whether the origin path is a folder
             if self.origin_file_pattern is None or self.origin_file_pattern == "":
                 self.origin_file_pattern = ""
@@ -190,7 +190,7 @@ class ModelConfig:
             else:
                 allow_file_pattern = self.origin_file_pattern
                 is_folder = False
-            
+
             # Download
             if self.local_model_path is None:
                 self.local_model_path = "./models"
@@ -203,12 +203,12 @@ class ModelConfig:
                     ignore_file_pattern=downloaded_files,
                     local_files_only=False
                 )
-            
+
             # Let rank 1, 2, ... wait for rank 0
             if use_usp:
                 import torch.distributed as dist
                 dist.barrier(device_ids=[dist.get_rank()])
-                
+
             # Return downloaded files
             if is_folder:
                 self.path = os.path.join(self.local_model_path, self.model_id, self.origin_file_pattern)

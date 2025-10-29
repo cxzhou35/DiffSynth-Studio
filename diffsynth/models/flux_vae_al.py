@@ -1,7 +1,5 @@
 import torch
 from .sd_unet import UpSampler, DownSampler, ResnetBlock
-from .sd_vae_encoder import VAEAttentionBlock
-from .sd_vae_decoder import VAEAttentionBlock
 from .flux_vae import FluxVAEEncoder, FluxVAEDecoder
 from ..utils.ideal_lpf import LPF_RFFT, UpsampleRFFT, WarpedNonlinearity, wrap_nonlinearity, WarpedConvIn
 
@@ -83,7 +81,7 @@ def wrap_resnetblock_with_al(resnet_block: ResnetBlock):
     wrapped_block = ALResnetBlock(
         resnet_block.in_channels,
         resnet_block.out_channels,
-        eps=resnet_block.norm1.eps
+        eps=resnet_block.eps
     )
 
     return wrapped_block
@@ -106,7 +104,6 @@ class FluxALVAEEncoder(FluxVAEEncoder):
                     self.blocks[i] = wrap_downsampler_with_al(block)
 
             self.conv_act = wrap_nonlinearity(self.conv_act)
-
 
 
 class FluxALVAEDecoder(FluxVAEDecoder):
