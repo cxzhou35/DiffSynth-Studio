@@ -36,7 +36,6 @@ class FluxTrainingModule(DiffusionTrainingModule):
         # Enable anti-aliased components in pipeline
         if use_al_vae:
             wrap_vae_with_al(self.pipe.vae_encoder, self.pipe.vae_decoder)
-
         if use_al_dit:
             assert False, "Anti-aliased DIT is not yet supported."
             # self.pipe.enable_al_dit = use_al_dit
