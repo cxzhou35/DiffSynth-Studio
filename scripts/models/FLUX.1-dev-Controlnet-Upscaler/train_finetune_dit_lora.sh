@@ -15,7 +15,7 @@ NUM_EPOCHS=5
 accelerate launch --mixed_precision=bf16 --multi_gpu --main_process_port 29501 --num_machines $NUM_NODES --num_processes $NUM_GPUS scripts/model/train.py \
   --dataset_base_path $DATASET_BASE_PATH \
   --dataset_metadata_path $DATASET_METADATA_PATH \
-  --data_file_keys "image,controlnet_image" \
+  --data_file_keys "image,controlnet_images" \
   --dataset_repeat $DATASET_REPEAT \
   --height $IMG_HEIGHT \
   --width $IMG_WIDTH \
@@ -27,6 +27,6 @@ accelerate launch --mixed_precision=bf16 --multi_gpu --main_process_port 29501 -
   --lora_base_model "dit" \
   --lora_target_modules "a_to_qkv,b_to_qkv,ff_a.0,ff_a.2,ff_b.0,ff_b.2,a_to_out,b_to_out,proj_out,norm.linear,norm1_a.linear,norm1_b.linear,to_qkv_mlp" \
   --lora_rank 32 \
-  --extra_inputs "controlnet_image" \
+  --extra_inputs "controlnet_images" \
   --align_to_opensource_format \
   --use_gradient_checkpointing

@@ -1,9 +1,9 @@
 import torch, os, json
-from diffsynth import load_state_dict
-from diffsynth.pipelines.flux_image_new import FluxImagePipeline, ModelConfig, ControlNetInput
+from diffsynth.pipelines.flux_image_new import ModelConfig, ControlNetInput
+from diffsynth.pipelines.flux_4dsr import Flux4DSRPipeline
 from diffsynth.trainers.utils import DiffusionTrainingModule, ModelLogger, launch_training_task, flux_parser
 from diffsynth.models.lora import FluxLoRAConverter
-from diffsynth.trainers.unified_dataset import UnifiedDataset
+from diffsynth.data.mvdata import MultiVideoDataset
 
 from diffsynth.models.flux_vae_al import wrap_vae_with_al
 from easyvolcap.utils.console_utils import *
@@ -24,7 +24,7 @@ class FluxTrainingModule(DiffusionTrainingModule):
         super().__init__()
         # Load models
         model_configs = self.parse_model_configs(model_paths, model_id_with_origin_paths, enable_fp8_training=False)
-        self.pipe = FluxImagePipeline.from_pretrained(torch_dtype=torch.bfloat16, device="cpu", model_configs=model_configs)
+        self.pipe = Flux4DSRPipeline.from_pretrained(torch_dtype=torch.bfloat16, device="cpu", model_configs=model_configs)
 
         # Training mode
         self.switch_pipe_to_training_mode(
@@ -96,12 +96,12 @@ def main():
     args = parser.parse_args()
 
     # create dataset from metadata
-    dataset = UnifiedDataset(
+    dataset = MultiVideoDataset(
         base_path=args.dataset_base_path,
         metadata_path=args.dataset_metadata_path,
         repeat=args.dataset_repeat,
         data_file_keys=args.data_file_keys.split(","),
-        main_data_operator=UnifiedDataset.default_image_operator(
+        main_data_operator=MultiVideoDataset.default_image_operator(
             base_path=args.dataset_base_path,
             max_pixels=args.max_pixels,
             height=args.height,

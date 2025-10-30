@@ -1,9 +1,10 @@
 # dirs
 data/*
-outputs/
-logs/
+outputs/*
+./logs/*
 models/*
-evals/*
+./evals/*
+.vscode/*
 
 __pycache__
 *.pyc

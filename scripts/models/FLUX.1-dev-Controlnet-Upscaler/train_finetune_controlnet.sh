@@ -19,7 +19,7 @@ NUM_EPOCHS=5
 accelerate launch --mixed_precision=bf16 --multi_gpu --main_process_port 29501 --num_machines $NUM_NODES --num_processes $NUM_GPUS --config_file examples/flux/model_training/full/accelerate_config.yaml scripts/model/train.py \
   --dataset_base_path $DATASET_BASE_PATH \
   --dataset_metadata_path $DATASET_METADATA_PATH \
-  --data_file_keys "image,controlnet_image" \
+  --data_file_keys "image,controlnet_images" \
   --dataset_repeat $DATASET_REPEAT \
   --height $IMG_HEIGHT \
   --width $IMG_WIDTH \
@@ -29,6 +29,6 @@ accelerate launch --mixed_precision=bf16 --multi_gpu --main_process_port 29501 -
   --remove_prefix_in_ckpt "pipe.controlnet.models.0." \
   --output_path $OUTPUT_PATH \
   --trainable_models "controlnet" \
-  --extra_inputs "controlnet_image" \
+  --extra_inputs "controlnet_images" \
   --use_gradient_checkpointing \
   --find_unused_parameters
