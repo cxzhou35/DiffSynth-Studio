@@ -3,9 +3,11 @@
 export NUM_NODES=1
 export NUM_GPUS=4
 
-DATASET_BASE_PATH="data/neemo_mini_1440p_120f/controlnet_data"
+SCENE_ID="neemo_mini_1440p_120f"
+TIMESTAMP=$(date +"%Y%m%d%H%M%S")
+DATASET_BASE_PATH="data/${SCENE_ID}/controlnet_data"
 DATASET_METADATA_PATH="${DATASET_BASE_PATH}/metadata.csv"
-OUTPUT_PATH="outputs/neemo_mini_1440p_120f/train_finetune_controlnet/models/FLUX.1-dev-Controlnet-Upscaler_controlnet"
+OUTPUT_PATH="outputs/${SCENE_ID}_${TIMESTAMP}/FLUX.1-Controlnet-Upscale-controlnet_full/models"
 # MAX_PIXELS=3686400 # 2560x1440
 IMG_HEIGHT=1440
 IMG_WIDTH=2560

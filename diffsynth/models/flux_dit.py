@@ -129,12 +129,22 @@ class FluxJointTransformerBlock(torch.nn.Module):
         )
 
 
-    def forward(self, hidden_states_a, hidden_states_b, temb, image_rotary_emb, attn_mask=None, ipadapter_kwargs_list=None):
+    def forward(self, hidden_states_a, hidden_states_b, temb, image_rotary_emb, attn_mask=None, num_frames=1, ipadapter_kwargs_list=None):
         norm_hidden_states_a, gate_msa_a, shift_mlp_a, scale_mlp_a, gate_mlp_a = self.norm1_a(hidden_states_a, emb=temb)
         norm_hidden_states_b, gate_msa_b, shift_mlp_b, scale_mlp_b, gate_mlp_b = self.norm1_b(hidden_states_b, emb=temb)
 
+        # 3D Attention
+        if num_frames > 1:
+            norm_hidden_states_a = rearrange(norm_hidden_states_a, "(b t) l c -> b (t l) c", f=num_frames).contiguous()
+            norm_hidden_states_b = rearrange(norm_hidden_states_b, "(b t) l c -> b (t l) c", f=num_frames).contiguous()
+
         # Attention
         attn_output_a, attn_output_b = self.attn(norm_hidden_states_a, norm_hidden_states_b, image_rotary_emb, attn_mask, ipadapter_kwargs_list)
+
+        # 3D Attention
+        if num_frames > 1:
+            attn_output_a = rearrange(attn_output_a, "b (t l) c -> (b t) l c", f=num_frames, l=hidden_states_a.shape[1] // num_frames).contiguous()
+            attn_output_b = rearrange(attn_output_b, "b (t l) c -> (b t) l c", f=num_frames, l=hidden_states_b.shape[1] // num_frames).contiguous()
 
         # Part A
         hidden_states_a = hidden_states_a + gate_msa_a * attn_output_a
@@ -243,7 +253,7 @@ class FluxSingleTransformerBlock(torch.nn.Module):
         return hidden_states
 
 
-    def forward(self, hidden_states_a, hidden_states_b, temb, image_rotary_emb, attn_mask=None, ipadapter_kwargs_list=None):
+    def forward(self, hidden_states_a, hidden_states_b, temb, image_rotary_emb, attn_mask=None, num_frames=1, ipadapter_kwargs_list=None):
         residual = hidden_states_a
         norm_hidden_states, gate = self.norm(hidden_states_a, emb=temb)
         hidden_states_a = self.to_qkv_mlp(norm_hidden_states)

@@ -98,6 +98,8 @@ class MultiVideoDataset(torch.utils.data.Dataset):
             metadata = pandas.read_csv(metadata_path)
             self.data = [metadata.iloc[i].to_dict() for i in range(len(metadata))]
 
+        breakpoint()
+
     def __getitem__(self, data_id):
         if self.load_from_cache:
             data = self.cached_data[data_id % len(self.cached_data)]

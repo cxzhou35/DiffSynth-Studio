@@ -1,23 +1,15 @@
-import torch, warnings, glob, os, types
+import torch
 import numpy as np
 from PIL import Image
-from einops import repeat, reduce
-from typing import Optional, Union
-from dataclasses import dataclass
-from modelscope import snapshot_download
 from einops import rearrange
-import numpy as np
-from PIL import Image
+from typing import Optional, Union
 from tqdm import tqdm
-from typing import Optional
-from typing_extensions import Literal
 
 from ..schedulers import FlowMatchScheduler
 from ..prompters import FluxPrompter
 from ..models import ModelManager, load_state_dict, SD3TextEncoder1, FluxTextEncoder2, FluxDiT, FluxVAEEncoder, FluxVAEDecoder
 from ..models.flux_ipadapter import FluxIpAdapter
 from ..models.flux_infiniteyou import InfiniteYouImageProjector
-from ..models.flux_lora_encoder import FluxLoRAEncoder, LoRALayerBlock
 from ..models.tiler import FastTileWorker
 from ..utils import BasePipeline, ModelConfig, PipelineUnitRunner, PipelineUnit
 from ..lora.flux_lora import FluxLoRALoader, FluxLoraPatcher, FluxLoRAFuser
@@ -37,9 +29,7 @@ from .flux_image_new import (
     FluxImageUnit_InfiniteYou,
     FluxImageUnit_ControlNet,
     FluxImageUnit_IPAdapter,
-    FluxImageUnit_EntityControl,
     FluxImageUnit_TeaCache,
-    FluxImageUnit_LoRAEncode,
     InfinitYou,
     TeaCache,
 )
@@ -65,7 +55,6 @@ class Flux4DSRPipeline(BasePipeline):
         self.infinityou_processor: InfinitYou = None
         self.image_proj_model: InfiniteYouImageProjector = None
         self.lora_patcher: FluxLoraPatcher = None
-        self.lora_encoder: FluxLoRAEncoder = None
         self.unit_runner = PipelineUnitRunner()
         self.in_iteration_models = ("dit", "controlnet", "lora_patcher")
         self.units = [
@@ -79,9 +68,7 @@ class Flux4DSRPipeline(BasePipeline):
             FluxImageUnit_InfiniteYou(),
             FluxImageUnit_ControlNet(),
             FluxImageUnit_IPAdapter(),
-            FluxImageUnit_EntityControl(),
             FluxImageUnit_TeaCache(),
-            FluxImageUnit_LoRAEncode(),
         ]
         self.model_fn = model_fn_flux_image
 
@@ -167,7 +154,6 @@ class Flux4DSRPipeline(BasePipeline):
                     torch.nn.Conv2d: AutoWrappedModule,
                     torch.nn.GroupNorm: AutoWrappedModule,
                     RMSNorm: AutoWrappedModule,
-                    LoRALayerBlock: AutoWrappedModule,
                 },
                 module_config = dict(
                     offload_dtype=dtype,
@@ -218,7 +204,7 @@ class Flux4DSRPipeline(BasePipeline):
             vram_limit = vram_limit - vram_buffer
 
         # Default config
-        default_vram_management_models = ["text_encoder_1", "vae_decoder", "vae_encoder", "controlnet", "image_proj_model", "ipadapter", "lora_patcher", "lora_encoder"]
+        default_vram_management_models = ["text_encoder_1", "vae_decoder", "vae_encoder", "controlnet", "image_proj_model", "ipadapter", "lora_patcher"]
         for model_name in default_vram_management_models:
             self._enable_vram_management_with_default_config(getattr(self, model_name), vram_limit)
 
@@ -327,7 +313,6 @@ class Flux4DSRPipeline(BasePipeline):
         if pipe.image_proj_model is not None:
             pipe.infinityou_processor = InfinitYou(device=device)
         pipe.lora_patcher = model_manager.fetch_model("flux_lora_patcher")
-        pipe.lora_encoder = model_manager.fetch_model("flux_lora_encoder")
 
         # ControlNet
         controlnets = []
@@ -373,17 +358,9 @@ class Flux4DSRPipeline(BasePipeline):
         # IP-Adapter
         ipadapter_images: Union[list[Image.Image], Image.Image] = None,
         ipadapter_scale: float = 1.0,
-        # EliGen
-        eligen_entity_prompts: list[str] = None,
-        eligen_entity_masks: list[Image.Image] = None,
-        eligen_enable_on_negative: bool = False,
-        eligen_enable_inpaint: bool = False,
         # InfiniteYou
         infinityou_id_image: Image.Image = None,
         infinityou_guidance: float = 1.0,
-        # LoRA Encoder
-        lora_encoder_inputs: Union[list[ModelConfig], ModelConfig, str] = None,
-        lora_encoder_scale: float = 1.0,
         # TeaCache
         tea_cache_l1_thresh: float = None,
         # Tile
@@ -412,9 +389,7 @@ class Flux4DSRPipeline(BasePipeline):
             "kontext_images": kontext_images,
             "controlnet_inputs": controlnet_inputs,
             "ipadapter_images": ipadapter_images, "ipadapter_scale": ipadapter_scale,
-            "eligen_entity_prompts": eligen_entity_prompts, "eligen_entity_masks": eligen_entity_masks, "eligen_enable_on_negative": eligen_enable_on_negative, "eligen_enable_inpaint": eligen_enable_inpaint,
             "infinityou_id_image": infinityou_id_image, "infinityou_guidance": infinityou_guidance,
-            "lora_encoder_inputs": lora_encoder_inputs, "lora_encoder_scale": lora_encoder_scale,
             "tea_cache_l1_thresh": tea_cache_l1_thresh,
             "tiled": tiled, "tile_size": tile_size, "tile_stride": tile_stride,
             "progress_bar_cmd": progress_bar_cmd,
@@ -465,14 +440,9 @@ def model_fn_flux_image(
     tiled=False,
     tile_size=128,
     tile_stride=64,
-    entity_prompt_emb=None,
-    entity_masks=None,
     ipadapter_kwargs_list={},
     id_emb=None,
     infinityou_guidance=None,
-    flex_condition=None,
-    flex_uncondition=None,
-    flex_control_stop_timestep=None,
     tea_cache: TeaCache = None,
     progress_id=0,
     num_inference_steps=1,
@@ -533,13 +503,6 @@ def model_fn_flux_image(
             controlnet_conditionings, **controlnet_extra_kwargs
         )
 
-    # Flex
-    if flex_condition is not None:
-        if timestep.tolist()[0] >= flex_control_stop_timestep:
-            hidden_states = torch.concat([hidden_states, flex_condition], dim=1)
-        else:
-            hidden_states = torch.concat([hidden_states, flex_uncondition], dim=1)
-
     if image_ids is None:
         image_ids = dit.prepare_image_ids(hidden_states)
 
@@ -554,17 +517,13 @@ def model_fn_flux_image(
     # Kontext
     if kontext_latents is not None:
         image_ids = torch.concat([image_ids, kontext_image_ids], dim=-2)
-        hidden_states = torch.concat([hidden_states, kontext_latents], dim=1)
+        hidden_states = torch.concat([hidden_states, kontext_latents], dim=1)  # (FxB, (N+1)xS, C), F is the frame number, N is the kontext image number
 
     hidden_states = dit.x_embedder(hidden_states)
 
-    # EliGen
-    if entity_prompt_emb is not None and entity_masks is not None:
-        prompt_emb, image_rotary_emb, attention_mask = dit.process_entity_masks(hidden_states, prompt_emb, entity_prompt_emb, entity_masks, text_ids, image_ids, latents.shape[1])
-    else:
-        prompt_emb = dit.context_embedder(prompt_emb)
-        image_rotary_emb = dit.pos_embedder(torch.cat((text_ids, image_ids), dim=1))
-        attention_mask = None
+    prompt_emb = dit.context_embedder(prompt_emb)
+    image_rotary_emb = dit.pos_embedder(torch.cat((text_ids, image_ids), dim=1))
+    attention_mask = None
 
     # TeaCache
     if tea_cache is not None:
