@@ -63,49 +63,6 @@ class MultiControlNet(torch.nn.Module):
 
 
 
-class TeaCache:
-    def __init__(self, num_inference_steps, rel_l1_thresh):
-        self.num_inference_steps = num_inference_steps
-        self.step = 0
-        self.accumulated_rel_l1_distance = 0
-        self.previous_modulated_input = None
-        self.rel_l1_thresh = rel_l1_thresh
-        self.previous_residual = None
-        self.previous_hidden_states = None
-
-    def check(self, dit: FluxDiT, hidden_states, conditioning):
-        inp = hidden_states.clone()
-        temb_ = conditioning.clone()
-        modulated_inp, _, _, _, _ = dit.blocks[0].norm1_a(inp, emb=temb_)
-        if self.step == 0 or self.step == self.num_inference_steps - 1:
-            should_calc = True
-            self.accumulated_rel_l1_distance = 0
-        else:
-            coefficients = [4.98651651e+02, -2.83781631e+02,  5.58554382e+01, -3.82021401e+00, 2.64230861e-01]
-            rescale_func = np.poly1d(coefficients)
-            self.accumulated_rel_l1_distance += rescale_func(((modulated_inp-self.previous_modulated_input).abs().mean() / self.previous_modulated_input.abs().mean()).cpu().item())
-            if self.accumulated_rel_l1_distance < self.rel_l1_thresh:
-                should_calc = False
-            else:
-                should_calc = True
-                self.accumulated_rel_l1_distance = 0
-        self.previous_modulated_input = modulated_inp
-        self.step += 1
-        if self.step == self.num_inference_steps:
-            self.step = 0
-        if should_calc:
-            self.previous_hidden_states = hidden_states.clone()
-        return not should_calc
-
-    def store(self, hidden_states):
-        self.previous_residual = hidden_states - self.previous_hidden_states
-        self.previous_hidden_states = None
-
-    def update(self, hidden_states):
-        hidden_states = hidden_states + self.previous_residual
-        return hidden_states
-
-
 class Flux4DSRPipeline(BasePipeline):
 
     def __init__(self, device="cuda", torch_dtype=torch.bfloat16):
@@ -135,6 +92,7 @@ class Flux4DSRPipeline(BasePipeline):
             FluxImageUnit_EmbeddedGuidanceEmbedder(),
             FluxImageUnit_Kontext(),
             FluxImageUnit_ControlNet(),
+            FluxImageUnit_IPAdapter(),
             FluxImageUnit_TeaCache(),
         ]
         self.model_fn = model_fn_flux_image
@@ -271,7 +229,7 @@ class Flux4DSRPipeline(BasePipeline):
             vram_limit = vram_limit - vram_buffer
 
         # Default config
-        default_vram_management_models = ["text_encoder_1", "vae_decoder", "vae_encoder", "controlnet", "image_proj_model", "ipadapter", "lora_patcher"]
+        default_vram_management_models = ["text_encoder_1", "vae_decoder", "vae_encoder", "controlnet", "ipadapter", "lora_patcher"]
         for model_name in default_vram_management_models:
             self._enable_vram_management_with_default_config(getattr(self, model_name), vram_limit)
 
@@ -418,7 +376,7 @@ class Flux4DSRPipeline(BasePipeline):
         # Kontext
         kontext_images: Union[list[Image.Image], Image.Image] = None,
         # Kontext reference image position offsets
-        ref_offsets: list[int] = [1, 0, 0],
+        kontext_ref_offsets: list[int] = [1, 0, 0],
         # ControlNet
         controlnet_inputs: list[ControlNetInput] = None,
         # IP-Adapter
@@ -450,7 +408,7 @@ class Flux4DSRPipeline(BasePipeline):
             "sigma_shift": sigma_shift, "num_inference_steps": num_inference_steps,
             "multidiffusion_prompts": multidiffusion_prompts, "multidiffusion_masks": multidiffusion_masks, "multidiffusion_scales": multidiffusion_scales,
             "kontext_images": kontext_images,
-            "ref_offsets": ref_offsets,
+            "kontext_ref_offsets": kontext_ref_offsets,
             "controlnet_inputs": controlnet_inputs,
             "ipadapter_images": ipadapter_images, "ipadapter_scale": ipadapter_scale,
             "tea_cache_l1_thresh": tea_cache_l1_thresh,
@@ -484,6 +442,242 @@ class Flux4DSRPipeline(BasePipeline):
         self.load_models_to_device([])
 
         return image
+
+
+
+class FluxImageUnit_ShapeChecker(PipelineUnit):
+    def __init__(self):
+        super().__init__(input_params=("height", "width"))
+
+    def process(self, pipe: Flux4DSRPipeline, height, width):
+        height, width = pipe.check_resize_height_width(height, width)
+        return {"height": height, "width": width}
+
+
+
+class FluxImageUnit_NoiseInitializer(PipelineUnit):
+    def __init__(self):
+        super().__init__(input_params=("height", "width", "seed", "rand_device"))
+
+    def process(self, pipe: Flux4DSRPipeline, height, width, seed, rand_device):
+        noise = pipe.generate_noise((1, 16, height//8, width//8), seed=seed, rand_device=rand_device)
+        return {"noise": noise}
+
+
+
+class FluxImageUnit_InputImageEmbedder(PipelineUnit):
+    def __init__(self):
+        super().__init__(
+            input_params=("input_image", "noise", "tiled", "tile_size", "tile_stride"),
+            onload_model_names=("vae_encoder",)
+        )
+
+    def process(self, pipe: Flux4DSRPipeline, input_image, noise, tiled, tile_size, tile_stride):
+        if input_image is None:
+            return {"latents": noise, "input_latents": None}
+        pipe.load_models_to_device(['vae_encoder'])
+        image = pipe.preprocess_image(input_image).to(device=pipe.device, dtype=pipe.torch_dtype)
+        input_latents = pipe.vae_encoder(image, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+        if pipe.scheduler.training:
+            return {"latents": noise, "input_latents": input_latents}
+        else:
+            latents = pipe.scheduler.add_noise(input_latents, noise, timestep=pipe.scheduler.timesteps[0])
+            return {"latents": latents, "input_latents": None}
+
+
+
+class FluxImageUnit_PromptEmbedder(PipelineUnit):
+    def __init__(self):
+        super().__init__(
+            seperate_cfg=True,
+            input_params_posi={"prompt": "prompt", "positive": "positive"},
+            input_params_nega={"prompt": "negative_prompt", "positive": "positive"},
+            input_params=("t5_sequence_length",),
+            onload_model_names=("text_encoder_1", "text_encoder_2")
+        )
+
+    def process(self, pipe: Flux4DSRPipeline, prompt, t5_sequence_length, positive) -> dict:
+        if pipe.text_encoder_1 is not None and pipe.text_encoder_2 is not None:
+            prompt_emb, pooled_prompt_emb, text_ids = pipe.prompter.encode_prompt(
+                prompt, device=pipe.device, positive=positive, t5_sequence_length=t5_sequence_length
+            )
+            return {"prompt_emb": prompt_emb, "pooled_prompt_emb": pooled_prompt_emb, "text_ids": text_ids}
+        else:
+            return {}
+
+
+class FluxImageUnit_ImageIDs(PipelineUnit):
+    def __init__(self):
+        super().__init__(input_params=("latents",))
+
+    def process(self, pipe: Flux4DSRPipeline, latents):
+        latent_image_ids = pipe.dit.prepare_image_ids(latents)
+        return {"image_ids": latent_image_ids}
+
+
+
+class FluxImageUnit_EmbeddedGuidanceEmbedder(PipelineUnit):
+    def __init__(self):
+        super().__init__(input_params=("embedded_guidance", "latents"))
+
+    def process(self, pipe: Flux4DSRPipeline, embedded_guidance, latents):
+        guidance = torch.Tensor([embedded_guidance] * latents.shape[0]).to(device=latents.device, dtype=latents.dtype)
+        return {"guidance": guidance}
+
+
+
+class FluxImageUnit_Kontext(PipelineUnit):
+    def __init__(self):
+        super().__init__(input_params=("kontext_images", "tiled", "tile_size", "tile_stride", "kontext_ref_offsets"))
+
+    def process(self, pipe: Flux4DSRPipeline, kontext_images, tiled, tile_size, tile_stride, kontext_ref_offsets):
+        if kontext_images is None:
+            return {}
+        if not isinstance(kontext_images, list):
+            kontext_images = [kontext_images]
+
+        kontext_latents = []
+        kontext_image_ids = []
+        for kontext_image in kontext_images:
+            kontext_image = pipe.preprocess_image(kontext_image)
+            kontext_latent = pipe.vae_encoder(kontext_image, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+            image_ids = pipe.dit.prepare_image_ids(kontext_latent)
+
+            # image_ids[..., 0] = 1
+            # add reference offsets to image_ids
+            assert len(kontext_ref_offsets) == 3, "Kontext model uses 3 dim position offsets."
+            for i in range(len(kontext_ref_offsets)):
+                image_ids[..., i] += kontext_ref_offsets[i]
+            kontext_image_ids.append(image_ids)
+            kontext_latent = pipe.dit.patchify(kontext_latent)
+            kontext_latents.append(kontext_latent)
+        kontext_latents = torch.concat(kontext_latents, dim=1)
+        kontext_image_ids = torch.concat(kontext_image_ids, dim=-2)
+        return {"kontext_latents": kontext_latents, "kontext_image_ids": kontext_image_ids}
+
+
+
+class FluxImageUnit_ControlNet(PipelineUnit):
+    def __init__(self):
+        super().__init__(
+            input_params=("controlnet_inputs", "tiled", "tile_size", "tile_stride"),
+            onload_model_names=("vae_encoder",)
+        )
+
+    def apply_controlnet_mask_on_latents(self, pipe, latents, mask):
+        mask = (pipe.preprocess_image(mask) + 1) / 2
+        mask = mask.mean(dim=1, keepdim=True)
+        mask = 1 - torch.nn.functional.interpolate(mask, size=latents.shape[-2:])
+        latents = torch.concat([latents, mask], dim=1)
+        return latents
+
+    def apply_controlnet_mask_on_image(self, pipe, image, mask):
+        mask = mask.resize(image.size)
+        mask = pipe.preprocess_image(mask).mean(dim=[0, 1]).cpu()
+        image = np.array(image)
+        image[mask > 0] = 0
+        image = Image.fromarray(image)
+        return image
+
+    def process(self, pipe: Flux4DSRPipeline, controlnet_inputs: list[ControlNetInput], tiled, tile_size, tile_stride):
+        if controlnet_inputs is None:
+            return {}
+        pipe.load_models_to_device(['vae_encoder'])
+        conditionings = []
+        for controlnet_input in controlnet_inputs:
+            image = controlnet_input.image
+            if controlnet_input.inpaint_mask is not None:
+                image = self.apply_controlnet_mask_on_image(pipe, image, controlnet_input.inpaint_mask)
+
+            image = pipe.preprocess_image(image).to(device=pipe.device, dtype=pipe.torch_dtype)
+            image = pipe.vae_encoder(image, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+
+            if controlnet_input.inpaint_mask is not None:
+                image = self.apply_controlnet_mask_on_latents(pipe, image, controlnet_input.inpaint_mask)
+            conditionings.append(image)
+        return {"controlnet_conditionings": conditionings}
+
+
+
+class FluxImageUnit_IPAdapter(PipelineUnit):
+    def __init__(self):
+        super().__init__(
+            take_over=True,
+            onload_model_names=("ipadapter_image_encoder", "ipadapter")
+        )
+
+    def process(self, pipe: Flux4DSRPipeline, inputs_shared, inputs_posi, inputs_nega):
+        ipadapter_images, ipadapter_scale = inputs_shared.get("ipadapter_images", None), inputs_shared.get("ipadapter_scale", 1.0)
+        if ipadapter_images is None:
+            return inputs_shared, inputs_posi, inputs_nega
+        if not isinstance(ipadapter_images, list):
+            ipadapter_images = [ipadapter_images]
+
+        pipe.load_models_to_device(self.onload_model_names)
+        images = [image.convert("RGB").resize((384, 384), resample=3) for image in ipadapter_images]
+        images = [pipe.preprocess_image(image).to(device=pipe.device, dtype=pipe.torch_dtype) for image in images]
+        ipadapter_images = torch.cat(images, dim=0)
+        ipadapter_image_encoding = pipe.ipadapter_image_encoder(ipadapter_images).pooler_output
+
+        inputs_posi.update({"ipadapter_kwargs_list": pipe.ipadapter(ipadapter_image_encoding, scale=ipadapter_scale)})
+        if inputs_shared.get("cfg_scale", 1.0) != 1.0:
+            inputs_nega.update({"ipadapter_kwargs_list": pipe.ipadapter(torch.zeros_like(ipadapter_image_encoding))})
+        return inputs_shared, inputs_posi, inputs_nega
+
+
+class FluxImageUnit_TeaCache(PipelineUnit):
+    def __init__(self):
+        super().__init__(input_params=("num_inference_steps","tea_cache_l1_thresh"))
+
+    def process(self, pipe: Flux4DSRPipeline, num_inference_steps, tea_cache_l1_thresh):
+        if tea_cache_l1_thresh is None:
+            return {}
+        else:
+            return {"tea_cache": TeaCache(num_inference_steps=num_inference_steps, rel_l1_thresh=tea_cache_l1_thresh)}
+
+
+
+class TeaCache:
+    def __init__(self, num_inference_steps, rel_l1_thresh):
+        self.num_inference_steps = num_inference_steps
+        self.step = 0
+        self.accumulated_rel_l1_distance = 0
+        self.previous_modulated_input = None
+        self.rel_l1_thresh = rel_l1_thresh
+        self.previous_residual = None
+        self.previous_hidden_states = None
+
+    def check(self, dit: FluxDiT, hidden_states, conditioning):
+        inp = hidden_states.clone()
+        temb_ = conditioning.clone()
+        modulated_inp, _, _, _, _ = dit.blocks[0].norm1_a(inp, emb=temb_)
+        if self.step == 0 or self.step == self.num_inference_steps - 1:
+            should_calc = True
+            self.accumulated_rel_l1_distance = 0
+        else:
+            coefficients = [4.98651651e+02, -2.83781631e+02,  5.58554382e+01, -3.82021401e+00, 2.64230861e-01]
+            rescale_func = np.poly1d(coefficients)
+            self.accumulated_rel_l1_distance += rescale_func(((modulated_inp-self.previous_modulated_input).abs().mean() / self.previous_modulated_input.abs().mean()).cpu().item())
+            if self.accumulated_rel_l1_distance < self.rel_l1_thresh:
+                should_calc = False
+            else:
+                should_calc = True
+                self.accumulated_rel_l1_distance = 0
+        self.previous_modulated_input = modulated_inp
+        self.step += 1
+        if self.step == self.num_inference_steps:
+            self.step = 0
+        if should_calc:
+            self.previous_hidden_states = hidden_states.clone()
+        return not should_calc
+
+    def store(self, hidden_states):
+        self.previous_residual = hidden_states - self.previous_hidden_states
+        self.previous_hidden_states = None
+
+    def update(self, hidden_states):
+        hidden_states = hidden_states + self.previous_residual
+        return hidden_states
 
 
 def model_fn_flux_image(
@@ -648,170 +842,3 @@ def model_fn_flux_image(
     hidden_states = dit.unpatchify(hidden_states, height, width)
 
     return hidden_states
-
-
-class FluxImageUnit_ShapeChecker(PipelineUnit):
-    def __init__(self):
-        super().__init__(input_params=("height", "width"))
-
-    def process(self, pipe: Flux4DSRPipeline, height, width):
-        height, width = pipe.check_resize_height_width(height, width)
-        return {"height": height, "width": width}
-
-
-
-class FluxImageUnit_NoiseInitializer(PipelineUnit):
-    def __init__(self):
-        super().__init__(input_params=("height", "width", "seed", "rand_device"))
-
-    def process(self, pipe: Flux4DSRPipeline, height, width, seed, rand_device):
-        noise = pipe.generate_noise((1, 16, height//8, width//8), seed=seed, rand_device=rand_device)
-        return {"noise": noise}
-
-
-
-class FluxImageUnit_InputImageEmbedder(PipelineUnit):
-    def __init__(self):
-        super().__init__(
-            input_params=("input_image", "noise", "tiled", "tile_size", "tile_stride"),
-            onload_model_names=("vae_encoder",)
-        )
-
-    def process(self, pipe: Flux4DSRPipeline, input_image, noise, tiled, tile_size, tile_stride):
-        if input_image is None:
-            return {"latents": noise, "input_latents": None}
-        pipe.load_models_to_device(['vae_encoder'])
-        image = pipe.preprocess_image(input_image).to(device=pipe.device, dtype=pipe.torch_dtype)
-        input_latents = pipe.vae_encoder(image, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
-        if pipe.scheduler.training:
-            return {"latents": noise, "input_latents": input_latents}
-        else:
-            latents = pipe.scheduler.add_noise(input_latents, noise, timestep=pipe.scheduler.timesteps[0])
-            return {"latents": latents, "input_latents": None}
-
-
-
-class FluxImageUnit_PromptEmbedder(PipelineUnit):
-    def __init__(self):
-        super().__init__(
-            seperate_cfg=True,
-            input_params_posi={"prompt": "prompt", "positive": "positive"},
-            input_params_nega={"prompt": "negative_prompt", "positive": "positive"},
-            input_params=("t5_sequence_length",),
-            onload_model_names=("text_encoder_1", "text_encoder_2")
-        )
-
-    def process(self, pipe: Flux4DSRPipeline, prompt, t5_sequence_length, positive) -> dict:
-        if pipe.text_encoder_1 is not None and pipe.text_encoder_2 is not None:
-            prompt_emb, pooled_prompt_emb, text_ids = pipe.prompter.encode_prompt(
-                prompt, device=pipe.device, positive=positive, t5_sequence_length=t5_sequence_length
-            )
-            return {"prompt_emb": prompt_emb, "pooled_prompt_emb": pooled_prompt_emb, "text_ids": text_ids}
-        else:
-            return {}
-
-
-class FluxImageUnit_ImageIDs(PipelineUnit):
-    def __init__(self):
-        super().__init__(input_params=("latents",))
-
-    def process(self, pipe: Flux4DSRPipeline, latents):
-        latent_image_ids = pipe.dit.prepare_image_ids(latents)
-        return {"image_ids": latent_image_ids}
-
-
-
-class FluxImageUnit_EmbeddedGuidanceEmbedder(PipelineUnit):
-    def __init__(self):
-        super().__init__(input_params=("embedded_guidance", "latents"))
-
-    def process(self, pipe: Flux4DSRPipeline, embedded_guidance, latents):
-        guidance = torch.Tensor([embedded_guidance] * latents.shape[0]).to(device=latents.device, dtype=latents.dtype)
-        return {"guidance": guidance}
-
-
-class FluxImageUnit_Kontext(PipelineUnit):
-    def __init__(self):
-        super().__init__(
-            input_params=("kontext_images", "tiled", "tile_size", "tile_stride", "ref_offsets"),
-            onload_model_names=("vae_encoder",)
-        )
-
-    def process(self, pipe: Flux4DSRPipeline, kontext_images, tiled, tile_size, tile_stride, ref_offsets):
-        pipe.load_models_to_device(['vae_encoder'])
-        if kontext_images is None:
-            return {}
-        if not isinstance(kontext_images, list):
-            kontext_images = [kontext_images]
-
-        kontext_latents = []
-        kontext_image_ids = []
-        for kontext_image in kontext_images:
-            kontext_image = pipe.preprocess_image(kontext_image)
-            kontext_latent = pipe.vae_encoder(kontext_image, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
-            image_ids = pipe.dit.prepare_image_ids(kontext_latent)
-
-            # image_ids[..., 0] = 1
-            # add reference offsets to image_ids
-            assert len(ref_offsets) == 3, "Kontext model uses 3 dim position offsets."
-            for i in range(len(ref_offsets)):
-                image_ids[:, i] += ref_offsets[i]
-            kontext_image_ids.append(image_ids)
-            kontext_latent = pipe.dit.patchify(kontext_latent)
-            kontext_latents.append(kontext_latent)
-        kontext_latents = torch.concat(kontext_latents, dim=1)
-        kontext_image_ids = torch.concat(kontext_image_ids, dim=-2)
-        return {"kontext_latents": kontext_latents, "kontext_image_ids": kontext_image_ids}
-
-
-class FluxImageUnit_ControlNet(PipelineUnit):
-    def __init__(self):
-        super().__init__(
-            input_params=("controlnet_inputs", "tiled", "tile_size", "tile_stride"),
-            onload_model_names=("vae_encoder",)
-        )
-
-    def apply_controlnet_mask_on_latents(self, pipe, latents, mask):
-        mask = (pipe.preprocess_image(mask) + 1) / 2
-        mask = mask.mean(dim=1, keepdim=True)
-        mask = 1 - torch.nn.functional.interpolate(mask, size=latents.shape[-2:])
-        latents = torch.concat([latents, mask], dim=1)
-        return latents
-
-    def apply_controlnet_mask_on_image(self, pipe, image, mask):
-        mask = mask.resize(image.size)
-        mask = pipe.preprocess_image(mask).mean(dim=[0, 1]).cpu()
-        image = np.array(image)
-        image[mask > 0] = 0
-        image = Image.fromarray(image)
-        return image
-
-    def process(self, pipe: Flux4DSRPipeline, controlnet_inputs: list[ControlNetInput], tiled, tile_size, tile_stride):
-        if controlnet_inputs is None:
-            return {}
-        pipe.load_models_to_device(['vae_encoder'])
-        conditionings = []
-        for controlnet_input in controlnet_inputs:
-            image = controlnet_input.image
-            if controlnet_input.inpaint_mask is not None:
-                image = self.apply_controlnet_mask_on_image(pipe, image, controlnet_input.inpaint_mask)
-
-            image = pipe.preprocess_image(image).to(device=pipe.device, dtype=pipe.torch_dtype)
-            image = pipe.vae_encoder(image, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
-
-            if controlnet_input.inpaint_mask is not None:
-                image = self.apply_controlnet_mask_on_latents(pipe, image, controlnet_input.inpaint_mask)
-            conditionings.append(image)
-        return {"controlnet_conditionings": conditionings}
-
-
-
-class FluxImageUnit_TeaCache(PipelineUnit):
-    def __init__(self):
-        super().__init__(input_params=("num_inference_steps","tea_cache_l1_thresh"))
-
-    def process(self, pipe: Flux4DSRPipeline, num_inference_steps, tea_cache_l1_thresh):
-        if tea_cache_l1_thresh is None:
-            return {}
-        else:
-            return {"tea_cache": TeaCache(num_inference_steps=num_inference_steps, rel_l1_thresh=tea_cache_l1_thresh)}

@@ -13,3 +13,10 @@ pynvml
 pandas
 accelerate
 peft
+
+# debug
+gpustat
+nvitop
+ipdb
+rich
+pdbr
