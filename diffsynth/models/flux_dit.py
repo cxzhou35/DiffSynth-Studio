@@ -135,16 +135,16 @@ class FluxJointTransformerBlock(torch.nn.Module):
 
         # 3D Attention
         if num_frames > 1:
-            norm_hidden_states_a = rearrange(norm_hidden_states_a, "(b t) l c -> b (t l) c", f=num_frames).contiguous()
-            norm_hidden_states_b = rearrange(norm_hidden_states_b, "(b t) l c -> b (t l) c", f=num_frames).contiguous()
+            norm_hidden_states_a = rearrange(norm_hidden_states_a, "(b t) l c -> b (t l) c", t=num_frames).contiguous()
+            norm_hidden_states_b = rearrange(norm_hidden_states_b, "(b t) l c -> b (t l) c", t=num_frames).contiguous()
 
         # Attention
         attn_output_a, attn_output_b = self.attn(norm_hidden_states_a, norm_hidden_states_b, image_rotary_emb, attn_mask, ipadapter_kwargs_list)
 
         # 3D Attention
         if num_frames > 1:
-            attn_output_a = rearrange(attn_output_a, "b (t l) c -> (b t) l c", f=num_frames, l=hidden_states_a.shape[1] // num_frames).contiguous()
-            attn_output_b = rearrange(attn_output_b, "b (t l) c -> (b t) l c", f=num_frames, l=hidden_states_b.shape[1] // num_frames).contiguous()
+            attn_output_a = rearrange(attn_output_a, "b (t l) c -> (b t) l c", t=num_frames).contiguous()
+            attn_output_b = rearrange(attn_output_b, "b (t l) c -> (b t) l c", t=num_frames).contiguous()
 
         # Part A
         hidden_states_a = hidden_states_a + gate_msa_a * attn_output_a
@@ -259,8 +259,16 @@ class FluxSingleTransformerBlock(torch.nn.Module):
         hidden_states_a = self.to_qkv_mlp(norm_hidden_states)
         attn_output, mlp_hidden_states = hidden_states_a[:, :, :self.dim * 3], hidden_states_a[:, :, self.dim * 3:]
 
+        # 3D Attention
+        if num_frames > 1:
+            attn_output = rearrange(attn_output, "(b t) l c -> b (t l) c", t=num_frames).contiguous()
+
         attn_output = self.process_attention(attn_output, image_rotary_emb, attn_mask, ipadapter_kwargs_list)
         mlp_hidden_states = torch.nn.functional.gelu(mlp_hidden_states, approximate="tanh")
+
+        # 3D Attention
+        if num_frames > 1:
+            attn_output = rearrange(attn_output, "b (t l) c -> (b t) l c", t=num_frames).contiguous()
 
         hidden_states_a = torch.cat([attn_output, mlp_hidden_states], dim=2)
         hidden_states_a = gate.unsqueeze(1) * self.proj_out(hidden_states_a)
@@ -316,17 +324,17 @@ class FluxDiT(torch.nn.Module):
 
     def prepare_image_ids(self, latents):
         batch_size, _, height, width = latents.shape
-        latent_image_ids = torch.zeros(height // 2, width // 2, 3)
+        latent_image_ids = torch.zeros(height // 2, width // 2, 3) # half of the latent size for patchifying(2x2)
         latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(height // 2)[:, None]
         latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(width // 2)[None, :]
 
         latent_image_id_height, latent_image_id_width, latent_image_id_channels = latent_image_ids.shape
 
-        latent_image_ids = latent_image_ids[None, :].repeat(batch_size, 1, 1, 1)
+        latent_image_ids = latent_image_ids[None, :].repeat(batch_size, 1, 1, 1) # (B, H/2, W/2, 3)
         latent_image_ids = latent_image_ids.reshape(
             batch_size, latent_image_id_height * latent_image_id_width, latent_image_id_channels
         )
-        latent_image_ids = latent_image_ids.to(device=latents.device, dtype=latents.dtype)
+        latent_image_ids = latent_image_ids.to(device=latents.device, dtype=latents.dtype) # (B, H/2 * W/2, 3)
 
         return latent_image_ids
 
