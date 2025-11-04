@@ -1,22 +1,33 @@
-import torch
-import numpy as np
-from PIL import Image
-from einops import rearrange
-from typing import Optional, Union
+from typing import Union, Optional
 from dataclasses import dataclass
+import numpy as np
+import torch
+from PIL import Image
 from tqdm import tqdm
-
-from ..schedulers import FlowMatchScheduler
+from einops import rearrange
+from ..utils import ModelConfig, BasePipeline, PipelineUnit, PipelineUnitRunner
+from ..models import (
+    FluxDiT,
+    ModelManager,
+    FluxVAEDecoder,
+    FluxVAEEncoder,
+    SD3TextEncoder1,
+    FluxTextEncoder2,
+    load_state_dict,
+)
 from ..prompters import FluxPrompter
-from ..models import ModelManager, load_state_dict, SD3TextEncoder1, FluxTextEncoder2, FluxDiT, FluxVAEEncoder, FluxVAEDecoder
+from ..schedulers import FlowMatchScheduler
+from ..models.tiler import FastTileWorker
+from ..lora.flux_lora import FluxLoRAFuser, FluxLoRALoader, FluxLoraPatcher
+from ..models.flux_dit import RMSNorm
+from ..vram_management import (
+    AutoWrappedLinear,
+    AutoWrappedModule,
+    enable_vram_management,
+    gradient_checkpoint_forward,
+)
 from ..models.flux_ipadapter import FluxIpAdapter
 from ..models.flux_controlnet import FluxControlNet
-from ..models.tiler import FastTileWorker
-from ..utils import BasePipeline, ModelConfig, PipelineUnitRunner, PipelineUnit
-from ..lora.flux_lora import FluxLoRALoader, FluxLoraPatcher, FluxLoRAFuser
-
-from ..models.flux_dit import RMSNorm
-from ..vram_management import gradient_checkpoint_forward, enable_vram_management, AutoWrappedModule, AutoWrappedLinear
 
 @dataclass
 class ControlNetInput:
@@ -235,7 +246,11 @@ class Flux4DSRPipeline(BasePipeline):
 
         # Special config
         if self.text_encoder_2 is not None:
-            from transformers.models.t5.modeling_t5 import T5LayerNorm, T5DenseActDense, T5DenseGatedActDense
+            from transformers.models.t5.modeling_t5 import (
+                T5LayerNorm,
+                T5DenseActDense,
+                T5DenseGatedActDense,
+            )
             dtype = next(iter(self.text_encoder_2.parameters())).dtype
             enable_vram_management(
                 self.text_encoder_2,
@@ -285,7 +300,11 @@ class Flux4DSRPipeline(BasePipeline):
                 vram_limit=vram_limit,
             )
         if self.ipadapter_image_encoder is not None:
-            from transformers.models.siglip.modeling_siglip import SiglipVisionEmbeddings, SiglipEncoder, SiglipMultiheadAttentionPoolingHead
+            from transformers.models.siglip.modeling_siglip import (
+                SiglipEncoder,
+                SiglipVisionEmbeddings,
+                SiglipMultiheadAttentionPoolingHead,
+            )
             dtype = next(iter(self.ipadapter_image_encoder.parameters())).dtype
             enable_vram_management(
                 self.ipadapter_image_encoder,
@@ -841,4 +860,5 @@ def model_fn_flux_image(
 
     hidden_states = dit.unpatchify(hidden_states, height, width)
 
+    return hidden_states
     return hidden_states
