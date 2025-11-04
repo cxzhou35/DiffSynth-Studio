@@ -1,11 +1,11 @@
 import os
-import json
 import argparse
 import torch
 from tqdm import tqdm
-from easyvolcap.utils.console_utils import *
 from diffsynth.data.mvdata import MultiVideoDataset
+from torch.utils.data.sampler import RandomSampler
 
+os.environ["PYTHONBREAKPOINT"] = "easyvolcap.utils.console_utils.set_trace"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 def parse_args():
@@ -29,6 +29,10 @@ def main():
         metadata_path=args.dataset_metadata_path,
         repeat=1,
         data_file_keys=args.data_file_keys.split(","),
+        use_temporal_sample=True,
+        temporal_window_size=4,
+        use_spatial_sample=True,
+        spatial_window_size=4,
         main_data_operator=MultiVideoDataset.default_image_operator(
             base_path=args.dataset_base_path,
             max_pixels=args.max_pixels,
@@ -39,10 +43,11 @@ def main():
         )
     )
 
+    # data = dataset.__getitem__(120)
+    # breakpoint()
     dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=8)
     for data in tqdm(dataloader):
         breakpoint()
-        print(data)
 
 
 if __name__ == '__main__':

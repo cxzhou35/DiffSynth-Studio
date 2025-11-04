@@ -1,4 +1,9 @@
-import torch, torchvision, imageio, os, json, pandas
+import torch
+import torchvision
+import imageio
+import os
+import json
+import pandas
 import imageio.v3 as iio
 from PIL import Image
 from .utils import (
@@ -24,6 +29,10 @@ class MultiVideoDataset(torch.utils.data.Dataset):
         base_path=None, metadata_path=None,
         repeat=1,
         data_file_keys=tuple(),
+        use_temporal_sample=False,
+        temporal_window_size=4,
+        use_spatial_sample=False,
+        spatial_window_size=4,
         main_data_operator=lambda x: x,
         special_operator_map=None,
     ):
@@ -37,7 +46,10 @@ class MultiVideoDataset(torch.utils.data.Dataset):
         self.data = []
         self.cached_data = []
         self.load_from_cache = metadata_path is None
+        self.temporal_window_size = temporal_window_size if use_temporal_sample else 1
+        self.spatial_window_size = spatial_window_size if use_spatial_sample else 1
         self.load_metadata(metadata_path)
+        self.parse_metadata()
 
     @staticmethod
     def default_image_operator(
@@ -98,21 +110,62 @@ class MultiVideoDataset(torch.utils.data.Dataset):
             metadata = pandas.read_csv(metadata_path)
             self.data = [metadata.iloc[i].to_dict() for i in range(len(metadata))]
 
-        breakpoint()
+    def parse_metadata(self):
+        extract_cam_id = lambda x: int(x['view_id'])
+        extract_frame_id = lambda x: int(x['frame_id'])
+        max_cam_id, min_cam_id = max(extract_cam_id(x) for x in self.data), min(extract_cam_id(x) for x in self.data)
+        self.cam_ids = list(range(min_cam_id, max_cam_id + 1))
+        self.n_cams = len(self.cam_ids)
+        max_frame_id, min_frame_id = max(extract_frame_id(x) for x in self.data), min(extract_frame_id(x) for x in self.data)
+        self.frame_ids = list(range(min_frame_id, max_frame_id + 1))
+        self.n_frames = len(self.frame_ids)
+
+    def get_mvdata_ids(self, data_id, domain='temporal'):
+        data_id = self.data[data_id % len(self.data)]
+        cam_id = int(data_id['view_id'])
+        frame_id = int(data_id['frame_id'])
+        data_ids = []
+
+        if domain == 'temporal':
+            # Temporal sampling
+            if frame_id-self.frame_ids[0]+1 < self.temporal_window_size:
+                temporal_ids = list(range(self.frame_ids[0], self.frame_ids[0]+self.temporal_window_size))
+            elif self.frame_ids[-1]-frame_id+1 < self.temporal_window_size:
+                temporal_ids = list(range(self.frame_ids[-1]-self.temporal_window_size+1, self.frame_ids[-1]+1))
+            else:
+                temporal_ids = list(range(frame_id-self.temporal_window_size//2, frame_id+(self.temporal_window_size+1)//2))
+            data_ids = [self.n_frames*(cam_id-self.cam_ids[0]) + (fid-self.frame_ids[0]) for fid in temporal_ids]
+
+        if domain == 'spatial':
+            # Spatial sampling
+            if cam_id-self.cam_ids[0]+1 < self.spatial_window_size:
+                spatial_ids = list(range(self.cam_ids[0], self.cam_ids[0]+self.spatial_window_size))
+            elif self.cam_ids[-1]-cam_id+1 < self.spatial_window_size:
+                spatial_ids = list(range(self.cam_ids[-1]-self.spatial_window_size+1, self.cam_ids[-1]+1))
+            else:
+                spatial_ids = list(range(cam_id-self.spatial_window_size//2, cam_id+(self.spatial_window_size+1)//2))
+            data_ids = [(sid-self.cam_ids[0])*self.n_frames + (frame_id-self.frame_ids[0]) for sid in spatial_ids]
+
+        return data_ids
 
     def __getitem__(self, data_id):
         if self.load_from_cache:
             data = self.cached_data[data_id % len(self.cached_data)]
             data = self.cached_data_operator(data)
+            return data
         else:
-            data = self.data[data_id % len(self.data)].copy()
-            for key in self.data_file_keys:
-                if key in data:
-                    if key in self.special_operator_map:
-                        data[key] = self.special_operator_map[key](data[key])
-                    elif key in self.data_file_keys:
-                        data[key] = self.main_data_operator(data[key])
-        return data
+            data_ids = self.get_mvdata_ids(data_id)
+            datas = []
+            for id in data_ids:
+                data = self.data[id].copy()
+                for key in self.data_file_keys:
+                    if key in data:
+                        if key in self.special_operator_map:
+                            data[key] = self.special_operator_map[key](data[key])
+                        elif key in self.data_file_keys:
+                            data[key] = self.main_data_operator(data[key])
+                datas.append(data)
+            return datas
 
     def __len__(self):
         if self.load_from_cache:

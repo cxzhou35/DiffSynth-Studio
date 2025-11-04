@@ -6,7 +6,7 @@ from diffsynth.models.lora import FluxLoRAConverter
 from diffsynth.data.mvdata import MultiVideoDataset
 
 from diffsynth.models.flux_vae_al import wrap_vae_with_al
-from easyvolcap.utils.console_utils import *
+from easyvolcap.utils.console_utils import log
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 class FluxTrainingModule(DiffusionTrainingModule):
@@ -38,7 +38,6 @@ class FluxTrainingModule(DiffusionTrainingModule):
             wrap_vae_with_al(self.pipe.vae_encoder, self.pipe.vae_decoder)
         if use_al_dit:
             assert False, "Anti-aliased DIT is not yet supported."
-            # self.pipe.enable_al_dit = use_al_dit
 
         # Store other configs
         self.use_gradient_checkpointing = use_gradient_checkpointing
@@ -101,6 +100,10 @@ def main():
         metadata_path=args.dataset_metadata_path,
         repeat=args.dataset_repeat,
         data_file_keys=args.data_file_keys.split(","),
+        use_temporal_sample=args.use_temporal_sample,
+        use_spatial_sample=args.use_spatial_sample,
+        temporal_window_size=args.temporal_window_size,
+        spatial_window_size=args.spatial_window_size,
         main_data_operator=MultiVideoDataset.default_image_operator(
             base_path=args.dataset_base_path,
             max_pixels=args.max_pixels,

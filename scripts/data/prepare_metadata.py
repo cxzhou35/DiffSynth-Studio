@@ -16,13 +16,14 @@ def check_dir_format(image_dir: str) -> str:
         raise ValueError(f"Invalid image directory format: {image_dir}")
 
 
-def construct_cond_data(image_dir: str, cond_image_dir: str, prompt: str, metafile_path: str, cond_type: str, remove_prefix):
+def construct_cond_data(image_dir: str, cond_image_dir: str, prompt: str, metafile_path: str, cond_type: str, remove_prefix: str):
     # check input and cond image directory format
     image_dir_format = check_dir_format(image_dir)
     cond_image_dir_format = check_dir_format(cond_image_dir)
     assert image_dir_format == cond_image_dir_format, f"Input image directory format and condition image directory format must be the same"
 
     metafile_handler = FileHandler(metafile_path)
+    metafile_type = metafile_handler.file_type
     total_pair_num = 0
 
     # construct condition data and write to metadata file
@@ -30,6 +31,8 @@ def construct_cond_data(image_dir: str, cond_image_dir: str, prompt: str, metafi
     if image_dir_format == "evc":
         view_dirs = sorted(os.listdir(image_dir))
         log(f"Found {len(view_dirs)} views in {image_dir}")
+        if metafile_type == "csv":
+            metafile_handler.update_data_container(["image", "prompt", f"{cond_type}_images", "view_id", "frame_id"])
         for view_dir in tqdm(view_dirs, desc=f"Constructing condition {cond_type} data"):
             image_view_dir = os.path.join(image_dir, view_dir)
             cond_image_view_dir = os.path.join(cond_image_dir, view_dir)
@@ -38,16 +41,25 @@ def construct_cond_data(image_dir: str, cond_image_dir: str, prompt: str, metafi
             for idx in range(len(image_list)):
                 image_path = os.path.join(image_view_dir, image_list[idx])
                 cond_image_path = os.path.join(cond_image_view_dir, cond_image_list[idx])
-                # data = [input_image_path, prompt, cond_image_path]
-                data = {
-                    "image": image_path.replace(remove_prefix, ""),
-                    "prompt": prompt,
-                    f"{cond_type}_images": cond_image_path.replace(remove_prefix, ""),
-                    "view_id": f"{view_dir}",
-                    "frame_id": f"{image_list[idx].split('.')[0]}"
-                }
-                image_id = f"{view_dir}_{image_list[idx].split('.')[0]}"
-                metafile_handler.update_data_container({image_id: data})
+                if metafile_type == "csv":
+                    data = [
+                        image_path.replace(remove_prefix, ""),
+                        prompt,
+                        cond_image_path.replace(remove_prefix, ""),
+                        f"{view_dir}",
+                        f"{image_list[idx].split('.')[0]}"
+                    ]
+                elif metafile_type in ["json", "jsonl"]:
+                    data = {
+                        "image": image_path.replace(remove_prefix, ""),
+                        "prompt": prompt,
+                        f"{cond_type}_images": cond_image_path.replace(remove_prefix, ""),
+                        "view_id": f"{view_dir}",
+                        "frame_id": f"{image_list[idx].split('.')[0]}"
+                    }
+                else:
+                    raise ValueError(f"Unsupported metafile type: {metafile_type}")
+                metafile_handler.update_data_container(data)
             total_pair_num += len(image_list)
         metafile_handler.write(metafile_handler.data_container)
 
@@ -57,11 +69,11 @@ def construct_cond_data(image_dir: str, cond_image_dir: str, prompt: str, metafi
         cond_image_list = sorted(os.listdir(cond_image_dir))
         total_pair_num += len(image_list)
         for idx in tqdm(range(len(image_list)), desc=f"Constructing condition {cond_type} data"):
-            image_path = os.path.join(image_view_dir, image_list[idx])
-            cond_image_path = os.path.join(cond_image_view_dir, cond_image_list[idx])
+            image_path = os.path.join(image_dir, image_list[idx])
+            cond_image_path = os.path.join(cond_image_dir, cond_image_list[idx])
             data = [image_path.replace(remove_prefix, ""), prompt, cond_image_path.replace(remove_prefix, "")]
-            data_container = metafile_handler.update_data_container(data)
-        metafile_handler.write(data_container)
+            metafile_handler.update_data_container(data)
+        metafile_handler.write(metafile_handler.data_container)
 
     return total_pair_num
 
@@ -74,7 +86,7 @@ def parse_args():
     parser.add_argument("-p", "--prompt", type=str, default="test prompt", help="Input prompt")
     parser.add_argument("-mt", "--meta_type", type=str, default="json", help="File type of metadata")
     parser.add_argument("-ct", "--cond_type", type=str, default="controlnet", help="Condition type (etc. controlnet, kontext)")
-    parser.add_argument("-rp", "--remove_prefix", type=str, default="/home/zhouchenxu/codes/DiffSynth-Studio/", help="Remove prefix in path")
+    parser.add_argument("-rp", "--remove_prefix", type=str, default="data/old_tim_1440p_120f/", help="Remove prefix in path")
 
     parse_args = parser.parse_args()
     return parse_args

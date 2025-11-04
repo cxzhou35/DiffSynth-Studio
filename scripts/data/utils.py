@@ -15,10 +15,11 @@ class FileHandler():
         self.data_container = self.create_data_container(file_type)
 
     def create_data_container(self, file_type: str):
-        if file_type == 'csv':
-            data_container = []
-        elif file_type == 'json':
-            data_container = DotDict()
+        data_container = []
+        # if file_type == 'csv':
+        #     data_container = []
+        # elif file_type == 'json':
+        #     data_container = DotDict()
 
         return data_container
 
@@ -26,13 +27,15 @@ class FileHandler():
         if self.file_type == 'csv':
             self.data_container.append(data)
         elif self.file_type == 'json':
-            self.data_container.update(data)
+            # self.data_container.update(data)
+            self.data_container.append(data)
 
     def read(self):
+        contents = None
         if self.file_type == 'csv':
             contents = self._read_csv(self.file_path)
         elif self.file_type == 'json':
-            contents = self._read_json(self.self_path)
+            contents = self._read_json(self.file_path)
 
         return contents
 

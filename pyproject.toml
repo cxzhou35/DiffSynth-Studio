@@ -19,6 +19,7 @@ exclude = ["**/node_modules", "**/__pycache__", "data"]
 reportMissingImports = "warning"
 reportMissingTypeStubs = false
 reportPrivateImportUsage = false
+reportAssignmentType = false
 
 [tool.isort]
 profile = "hug"
