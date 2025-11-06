@@ -636,8 +636,8 @@ def flux_parser():
     parser.add_argument("--data_file_keys", type=str, default="image", help="Data file keys in the metadata. Comma-separated.")
     parser.add_argument("--dataset_repeat", type=int, default=1, help="Number of times to repeat the dataset per epoch.")
     parser.add_argument("--use_temporal_sample", default=False, action="store_true", help="Whether to use temporal sampling for mv datasets.")
-    parser.add_argument("--use_spatial_sample", default=False, action="store_true", help="Whether to use spatial sampling for mv datasets.")
     parser.add_argument("--temporal_window_size", type=int, default=4, help="Temporal window size for temporal sampling.")
+    parser.add_argument("--use_spatial_sample", default=False, action="store_true", help="Whether to use spatial sampling for mv datasets.")
     parser.add_argument("--spatial_window_size", type=int, default=4, help="Spatial window size for spatial sampling.")
     parser.add_argument("--model_paths", type=str, default=None, help="Paths to load models. In JSON format.")
     parser.add_argument("--model_id_with_origin_paths", type=str, default=None, help="Model ID with origin paths, e.g., Wan-AI/Wan2.1-T2V-1.3B:diffusion_pytorch_model*.safetensors. Comma-separated.")
@@ -651,6 +651,7 @@ def flux_parser():
     parser.add_argument("--lora_rank", type=int, default=32, help="Rank of LoRA.")
     parser.add_argument("--lora_checkpoint", type=str, default=None, help="Path to the LoRA checkpoint. If provided, LoRA will be loaded from this checkpoint.")
     parser.add_argument("--extra_inputs", default=None, help="Additional model inputs, comma-separated.")
+    parser.add_argument("--kontext_ref_offsets", nargs=3, type=int, default=[1, 0, 0], help="Reference frame offsets for kontext module.")
     parser.add_argument("--align_to_opensource_format", default=False, action="store_true", help="Whether to align the lora format to opensource format. Only for DiT's LoRA.")
     parser.add_argument("--use_gradient_checkpointing", default=False, action="store_true", help="Whether to use gradient checkpointing.")
     parser.add_argument("--use_gradient_checkpointing_offload", default=False, action="store_true", help="Whether to offload gradient checkpointing to CPU memory.")
@@ -661,6 +662,8 @@ def flux_parser():
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
     parser.add_argument("--use_al_vae", default=False, action="store_true", help="Whether use the anti-aliased components for vae.")
     parser.add_argument("--use_al_dit", default=False, action="store_true", help="Whether use the anti-aliased components for dit.")
+    parser.add_argument("--use_fdl_loss", default=False, action="store_true", help="Whether use fdl loss in trianing.")
+    parser.add_argument("--fdl_loss_weight", type=float, default=0.001, help="Weight for fdl loss if used.")
     return parser
 
 

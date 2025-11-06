@@ -1,28 +1,29 @@
 #! /bin/bash
+
 export NUM_NODES=1
-export NUM_GPUS=1
-# export CUDA_VISIBLE_DEVICES="0"
+export NUM_GPUS=4
 
-export NCCL_DEBUG=INFO
-export CUDA_LAUNCH_BLOCKING=1
-export ACCELERATE_DEBUG_MODE="1"
-
-DATASET_BASE_PATH="data/old_tim_1440p_120f/kontext_data"
+# get time now
+SCENE_ID="neemo_mini_1440p_120f"
+TIMESTAMP=$(date +"%Y%m%d%H%M%S")
+DATASET_BASE_PATH="data/${SCENE_ID}"
 DATASET_METADATA_PATH="${DATASET_BASE_PATH}/metadata.json"
-OUTPUT_PATH="outputs/debug"
+OUTPUT_PATH="outputs/${SCENE_ID}_${TIMESTAMP}/FLUX.1-Kontext-dev-lora/models"
 # MAX_PIXELS=3686400 # 2560x1440
 IMG_HEIGHT=1440
 IMG_WIDTH=2560
-DATASET_REPEAT=10
-NUM_EPOCHS=1
+DATASET_REPEAT=2
+NUM_EPOCHS=5
 
-accelerate launch --mixed_precision=bf16 --num_processes 1 scripts/models/train.py \
+accelerate launch --mixed_precision=bf16 --multi_gpu --main_process_port 29501 --num_machines $NUM_NODES --num_processes $NUM_GPUS scripts/model/train.py \
   --dataset_base_path $DATASET_BASE_PATH \
   --dataset_metadata_path $DATASET_METADATA_PATH \
   --data_file_keys "image,kontext_images" \
   --height $IMG_HEIGHT \
   --width $IMG_WIDTH \
   --dataset_repeat $DATASET_REPEAT \
+  --use_temporal_sample \
+  --temporal_window_size 4 \
   --model_id_with_origin_paths "black-forest-labs/FLUX.1-Kontext-dev:flux1-kontext-dev.safetensors,black-forest-labs/FLUX.1-dev:text_encoder/model.safetensors,black-forest-labs/FLUX.1-dev:text_encoder_2/,black-forest-labs/FLUX.1-dev:ae.safetensors" \
   --learning_rate 1e-4 \
   --num_epochs $NUM_EPOCHS \

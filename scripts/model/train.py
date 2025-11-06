@@ -1,3 +1,4 @@
+import importlib
 import torch, os, json
 from diffsynth.pipelines.flux_image_new import ModelConfig, ControlNetInput
 from diffsynth.pipelines.flux_4dsr import Flux4DSRPipeline
@@ -6,8 +7,7 @@ from diffsynth.models.lora import FluxLoRAConverter
 from diffsynth.data.mvdata import MultiVideoDataset
 
 from diffsynth.models.flux_vae_al import wrap_vae_with_al
-from easyvolcap.utils.console_utils import log
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 
 class FluxTrainingModule(DiffusionTrainingModule):
     def __init__(
@@ -20,6 +20,9 @@ class FluxTrainingModule(DiffusionTrainingModule):
         extra_inputs=None,
         use_al_vae=False,
         use_al_dit=False,
+        kontext_ref_offsets=None,
+        use_fdl_loss=False,
+        fdl_loss_weights=None,
     ):
         super().__init__()
         # Load models
@@ -43,19 +46,30 @@ class FluxTrainingModule(DiffusionTrainingModule):
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.use_gradient_checkpointing_offload = use_gradient_checkpointing_offload
         self.extra_inputs = extra_inputs.split(",") if extra_inputs is not None else []
+        self.kontext_ref_offsets = kontext_ref_offsets if kontext_ref_offsets is not None else [1, 0, 0]
+        self.use_fdl_loss = use_fdl_loss
+        self.fdl_loss_weights = fdl_loss_weights if use_fdl_loss else None
 
-    def forward_preprocess(self, data):
+    def forward_preprocess(self, datas):
         # CFG-sensitive parameters
-        inputs_posi = {"prompt": data["prompt"]}
+        # inputs_posi = {"prompt": data["prompt"]}
+        inputs_posi = {"prompt": datas[0]["prompt"]}
         inputs_nega = {"negative_prompt": ""}
 
         # CFG-unsensitive parameters
         inputs_shared = {
             # Assume you are using this pipeline for inference,
             # please fill in the input parameters.
-            "input_image": data["image"],
-            "height": data["image"].size[1],
-            "width": data["image"].size[0],
+            # "input_image": data["image"],
+            # "height": data["image"].size[1],
+            # "width": data["image"].size[0],
+            "input_image": [data["image"] for data in datas],
+            "height": datas[0]["image"].size[1],
+            "width": datas[0]["image"].size[0],
+            "kontext_ref_offsets": self.kontext_ref_offsets,
+            # loss
+            "use_fdl_loss": self.use_fdl_loss,
+            "fdl_loss_weights": self.fdl_loss_weights,
             # Please do not modify the following parameters
             # unless you clearly know what this will cause.
             "cfg_scale": 1,
@@ -71,9 +85,9 @@ class FluxTrainingModule(DiffusionTrainingModule):
         controlnet_input = {}
         for extra_input in self.extra_inputs:
             if extra_input.startswith("controlnet_"):
-                controlnet_input[extra_input.replace("controlnet_", "")] = data[extra_input]
+                controlnet_input[extra_input.replace("controlnet_", "")] = [data[extra_input] for data in datas]
             else:
-                inputs_shared[extra_input] = data[extra_input]
+                inputs_shared[extra_input] = [data[extra_input] for data in datas]
         if len(controlnet_input) > 0:
             inputs_shared["controlnet_inputs"] = [ControlNetInput(**controlnet_input)]
 
@@ -101,8 +115,8 @@ def main():
         repeat=args.dataset_repeat,
         data_file_keys=args.data_file_keys.split(","),
         use_temporal_sample=args.use_temporal_sample,
-        use_spatial_sample=args.use_spatial_sample,
         temporal_window_size=args.temporal_window_size,
+        use_spatial_sample=args.use_spatial_sample,
         spatial_window_size=args.spatial_window_size,
         main_data_operator=MultiVideoDataset.default_image_operator(
             base_path=args.dataset_base_path,
@@ -128,6 +142,9 @@ def main():
         extra_inputs=args.extra_inputs,
         use_al_vae=args.use_al_vae,
         use_al_dit=args.use_al_dit,
+        kontext_ref_offsets=args.kontext_ref_offsets,
+        use_fdl_loss=args.use_fdl_loss,
+        fdl_loss_weights=args.fdl_loss_weights,
     )
 
     # set logger
@@ -139,5 +156,10 @@ def main():
 
     launch_training_task(dataset, model, model_logger, args=args)
 
+def set_env():
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    os.environ["PYTHONBREAKPOINT"] = "easyvolcap.utils.console_utils.set_trace"
+
 if __name__ == "__main__":
+    set_env()
     main()

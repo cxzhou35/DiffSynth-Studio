@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from PIL import Image
 from tqdm import tqdm
-from einops import rearrange
+from einops import rearrange, repeat
 from ..utils import ModelConfig, BasePipeline, PipelineUnit, PipelineUnitRunner
 from ..models import (
     FluxDiT,
@@ -28,6 +28,9 @@ from ..vram_management import (
 )
 from ..models.flux_ipadapter import FluxIpAdapter
 from ..models.flux_controlnet import FluxControlNet
+
+from easyvolcap.utils.console_utils import log
+from FDL_pytorch import FDL_loss
 
 @dataclass
 class ControlNetInput:
@@ -175,6 +178,11 @@ class Flux4DSRPipeline(BasePipeline):
 
         loss = torch.nn.functional.mse_loss(noise_pred.float(), training_target.float())
         loss = loss * self.scheduler.training_weight(timestep)
+
+        # TODO: add FDL loss
+        if inputs["use_fdl_loss"]:
+            fdl_loss = FDL_loss(num_proj=128, model="VGG")
+            loss += fdl_loss(noise_pred.float(), training_target.float()) * inputs["fdl_loss_weights"]
         return loss
 
 
@@ -495,8 +503,17 @@ class FluxImageUnit_InputImageEmbedder(PipelineUnit):
         if input_image is None:
             return {"latents": noise, "input_latents": None}
         pipe.load_models_to_device(['vae_encoder'])
-        image = pipe.preprocess_image(input_image).to(device=pipe.device, dtype=pipe.torch_dtype)
-        input_latents = pipe.vae_encoder(image, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+        input_latents = []
+        for img in input_image:
+            image = pipe.preprocess_image(img).to(device=pipe.device, dtype=pipe.torch_dtype)
+            input_latent = pipe.vae_encoder(image, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+            input_latents.append(input_latent)
+
+        # TODO: concat the input latents in batch dim, from (B, C, H, W) -> (NxB, C, H, W)
+        input_latents = torch.concat(input_latents, dim=0)
+        noise = repeat(noise, '1 ... -> b ...', b=input_latents.shape[0])
+        log(f"Input latents shape: {input_latents.shape}")
+        log(f"Noise shape: {noise.shape}")
         if pipe.scheduler.training:
             return {"latents": noise, "input_latents": input_latents}
         else:
@@ -570,8 +587,19 @@ class FluxImageUnit_Kontext(PipelineUnit):
             kontext_image_ids.append(image_ids)
             kontext_latent = pipe.dit.patchify(kontext_latent)
             kontext_latents.append(kontext_latent)
-        kontext_latents = torch.concat(kontext_latents, dim=1)
-        kontext_image_ids = torch.concat(kontext_image_ids, dim=-2)
+
+        if len(kontext_images) > 1:
+            # TODO: multi-inputs concat in batch dim
+            kontext_latents = torch.concat(kontext_latents, dim=0)
+            kontext_image_ids = torch.concat(kontext_image_ids, dim=0)
+        else:
+            # original concat in sequence dim
+            kontext_latents = torch.concat(kontext_latents, dim=1)
+            kontext_image_ids = torch.concat(kontext_image_ids, dim=-2)
+
+        log(f"Kontext latents shape: {kontext_latents.shape}")
+        log(f"Kontext image IDs shape: {kontext_image_ids.shape}")
+
         return {"kontext_latents": kontext_latents, "kontext_image_ids": kontext_image_ids}
 
 
@@ -783,14 +811,17 @@ def model_fn_flux_image(
         conditioning = conditioning + dit.guidance_embedder(guidance, hidden_states.dtype)
 
     height, width = hidden_states.shape[-2:]
-    hidden_states = dit.patchify(hidden_states)
+    hidden_states = dit.patchify(hidden_states) # (B, S, C), S is the sequence length
 
     # Kontext
     if kontext_latents is not None:
-        image_ids = torch.concat([image_ids, kontext_image_ids], dim=-2)
-        hidden_states = torch.concat([hidden_states, kontext_latents], dim=1)  # (FxB, (N+1)xS, C), F is the frame number, N is the kontext image number
+        image_ids = torch.concat([image_ids, kontext_image_ids], dim=-2) # (B, 2S, C), kontext image ids have the same sequence length S
+        hidden_states = torch.concat([hidden_states, kontext_latents], dim=1) # (B, 2S, C), kontext latents have the same sequence length S
 
     hidden_states = dit.x_embedder(hidden_states)
+
+    # TODO: batch dim expand to align with image_ids shape
+    text_ids = repeat(text_ids, '1 ... -> b ...', b=image_ids.shape[0])
 
     prompt_emb = dit.context_embedder(prompt_emb)
     image_rotary_emb = dit.pos_embedder(torch.cat((text_ids, image_ids), dim=1))
@@ -816,6 +847,7 @@ def model_fn_flux_image(
                 conditioning,
                 image_rotary_emb,
                 attention_mask,
+                num_frames=hidden_states.shape[0],
                 ipadapter_kwargs_list=ipadapter_kwargs_list.get(block_id, None),
             )
             # ControlNet
@@ -838,6 +870,7 @@ def model_fn_flux_image(
                 conditioning,
                 image_rotary_emb,
                 attention_mask,
+                num_frames=hidden_states.shape[0],
                 ipadapter_kwargs_list=ipadapter_kwargs_list.get(block_id + num_joint_blocks, None),
             )
             # ControlNet
@@ -860,5 +893,4 @@ def model_fn_flux_image(
 
     hidden_states = dit.unpatchify(hidden_states, height, width)
 
-    return hidden_states
     return hidden_states

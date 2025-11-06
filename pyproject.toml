@@ -13,13 +13,15 @@ classifiers = [
 [project.urls]
 homepage = "https://github.com/cxzhou35/project_page"
 
-[tool.pyright]
+[tool.basedpyright]
+include = ["scripts", "diffsynth"]
 exclude = ["**/node_modules", "**/__pycache__", "data"]
-
+typeCheckingMode = "off"
 reportMissingImports = "warning"
 reportMissingTypeStubs = false
 reportPrivateImportUsage = false
 reportAssignmentType = false
+
 
 [tool.isort]
 profile = "hug"

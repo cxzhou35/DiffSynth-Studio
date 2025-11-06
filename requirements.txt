@@ -13,6 +13,7 @@ pynvml
 pandas
 accelerate
 peft
+fdl-pytorch
 
 # debug
 gpustat
