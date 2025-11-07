@@ -663,7 +663,7 @@ def flux_parser():
     parser.add_argument("--use_al_vae", default=False, action="store_true", help="Whether use the anti-aliased components for vae.")
     parser.add_argument("--use_al_dit", default=False, action="store_true", help="Whether use the anti-aliased components for dit.")
     parser.add_argument("--use_fdl_loss", default=False, action="store_true", help="Whether use fdl loss in trianing.")
-    parser.add_argument("--fdl_loss_weight", type=float, default=0.001, help="Weight for fdl loss if used.")
+    parser.add_argument("--fdl_loss_weights", type=float, default=0.001, help="Weights for fdl loss if used.")
     return parser
 
 

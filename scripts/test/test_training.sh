@@ -28,7 +28,7 @@ accelerate launch --mixed_precision=bf16 scripts/model/train.py \
   --width $IMG_WIDTH \
   --dataset_repeat $DATASET_REPEAT \
   --use_temporal_sample \
-  --temporal_window_size 4 \
+  --temporal_window_size 2 \
   --kontext_ref_offsets 1 0 0 \
   --model_id_with_origin_paths "black-forest-labs/FLUX.1-Kontext-dev:flux1-kontext-dev.safetensors,black-forest-labs/FLUX.1-dev:text_encoder/model.safetensors,black-forest-labs/FLUX.1-dev:text_encoder_2/,black-forest-labs/FLUX.1-dev:ae.safetensors" \
   --learning_rate 1e-4 \

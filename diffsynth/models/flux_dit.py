@@ -137,6 +137,7 @@ class FluxJointTransformerBlock(torch.nn.Module):
         if num_frames > 1:
             norm_hidden_states_a = rearrange(norm_hidden_states_a, "(b t) l c -> b (t l) c", t=num_frames).contiguous()
             norm_hidden_states_b = rearrange(norm_hidden_states_b, "(b t) l c -> b (t l) c", t=num_frames).contiguous()
+            image_rotary_emb = rearrange(image_rotary_emb, "b 1 l ... -> 1 1 (b l) ...").contiguous()
 
         # Attention
         attn_output_a, attn_output_b = self.attn(norm_hidden_states_a, norm_hidden_states_b, image_rotary_emb, attn_mask, ipadapter_kwargs_list)
@@ -262,6 +263,7 @@ class FluxSingleTransformerBlock(torch.nn.Module):
         # 3D Attention
         if num_frames > 1:
             attn_output = rearrange(attn_output, "(b t) l c -> b (t l) c", t=num_frames).contiguous()
+            image_rotary_emb = rearrange(image_rotary_emb, "b 1 l ... -> 1 1 (b l) ...").contiguous()
 
         attn_output = self.process_attention(attn_output, image_rotary_emb, attn_mask, ipadapter_kwargs_list)
         mlp_hidden_states = torch.nn.functional.gelu(mlp_hidden_states, approximate="tanh")
