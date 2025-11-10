@@ -1,7 +1,7 @@
 [project]
-name = "flux-4dsr"
+name = "diffsynth"
 version = "0.1.0"
-description = "flux 4dsr"
+description = "diffsynth-4dsr"
 authors = [{ name = "cxzhou35", email = "cxzhou35@zju.edu.cn" }]
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -20,7 +20,10 @@ typeCheckingMode = "off"
 reportMissingImports = "warning"
 reportMissingTypeStubs = false
 reportPrivateImportUsage = false
+reportUnknownVariableType = false
 reportAssignmentType = false
+reportImplicitRelativeImport = false
+reportAny = false
 
 
 [tool.isort]

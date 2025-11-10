@@ -597,8 +597,8 @@ class FluxImageUnit_Kontext(PipelineUnit):
             kontext_latents = torch.concat(kontext_latents, dim=1)
             kontext_image_ids = torch.concat(kontext_image_ids, dim=-2)
 
-        log(f"Kontext latents shape: {kontext_latents.shape}")
-        log(f"Kontext image IDs shape: {kontext_image_ids.shape}")
+        # log(f"Kontext latents shape: {kontext_latents.shape}")
+        # log(f"Kontext image IDs shape: {kontext_image_ids.shape}")
 
         return {"kontext_latents": kontext_latents, "kontext_image_ids": kontext_image_ids}
 
@@ -838,6 +838,8 @@ def model_fn_flux_image(
     else:
         # Joint Blocks
         for block_id, block in enumerate(dit.blocks):
+            num_frames = hidden_states.shape[0] if block_id < len(dit.blocks) // 3 else 1
+            log(f"Double block {block_id} with number of frames: {num_frames}")
             hidden_states, prompt_emb = gradient_checkpoint_forward(
                 block,
                 use_gradient_checkpointing,
@@ -847,7 +849,7 @@ def model_fn_flux_image(
                 conditioning,
                 image_rotary_emb,
                 attention_mask,
-                num_frames=hidden_states.shape[0],
+                num_frames,
                 ipadapter_kwargs_list=ipadapter_kwargs_list.get(block_id, None),
             )
             # ControlNet
@@ -861,6 +863,8 @@ def model_fn_flux_image(
         hidden_states = torch.cat([prompt_emb, hidden_states], dim=1)
         num_joint_blocks = len(dit.blocks)
         for block_id, block in enumerate(dit.single_blocks):
+            num_frames = hidden_states.shape[0] if block_id < len(dit.single_blocks) // 3 else 1
+            log(f"Single block {block_id} with number of frames: {num_frames}")
             hidden_states, prompt_emb = gradient_checkpoint_forward(
                 block,
                 use_gradient_checkpointing,
@@ -870,7 +874,7 @@ def model_fn_flux_image(
                 conditioning,
                 image_rotary_emb,
                 attention_mask,
-                num_frames=hidden_states.shape[0],
+                num_frames,
                 ipadapter_kwargs_list=ipadapter_kwargs_list.get(block_id + num_joint_blocks, None),
             )
             # ControlNet
