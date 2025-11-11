@@ -12,18 +12,20 @@ TIMESTAMP=$(date +"%Y%m%d%H%M%S")
 DATASET_BASE_PATH="data/${SCENE_ID}"
 DATASET_METADATA_PATH="${DATASET_BASE_PATH}/kontext_data/metadata.json"
 OUTPUT_PATH="outputs/debug_${SCENE_ID}_${TIMESTAMP}"
-# MAX_PIXELS=3686400 # 2560x1440
+MAX_PIXELS=921600 # 1280x720 for kontext images
 IMG_HEIGHT=1440
 IMG_WIDTH=2560
 DATASET_REPEAT=1
 NUM_EPOCHS=1
 #   --use_temporal_sample \
 #   --temporal_window_size 4 \
+#   --lora_rank 32 \
 
 accelerate launch --mixed_precision=bf16 scripts/model/train.py \
   --dataset_base_path $DATASET_BASE_PATH \
   --dataset_metadata_path $DATASET_METADATA_PATH \
   --data_file_keys "image,kontext_images" \
+  --max_pixels $MAX_PIXELS \
   --height $IMG_HEIGHT \
   --width $IMG_WIDTH \
   --dataset_repeat $DATASET_REPEAT \
@@ -42,3 +44,4 @@ accelerate launch --mixed_precision=bf16 scripts/model/train.py \
   --extra_inputs "kontext_images" \
   --use_gradient_checkpointing \
   --use_gradient_checkpointing_offload \
+  --dit_3d_attn_interval 3 \

@@ -512,8 +512,6 @@ class FluxImageUnit_InputImageEmbedder(PipelineUnit):
         # TODO: concat the input latents in batch dim, from (B, C, H, W) -> (NxB, C, H, W)
         input_latents = torch.concat(input_latents, dim=0)
         noise = repeat(noise, '1 ... -> b ...', b=input_latents.shape[0])
-        log(f"Input latents shape: {input_latents.shape}")
-        log(f"Noise shape: {noise.shape}")
         if pipe.scheduler.training:
             return {"latents": noise, "input_latents": input_latents}
         else:
@@ -577,7 +575,7 @@ class FluxImageUnit_Kontext(PipelineUnit):
         for kontext_image in kontext_images:
             kontext_image = pipe.preprocess_image(kontext_image)
             kontext_latent = pipe.vae_encoder(kontext_image, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
-            image_ids = pipe.dit.prepare_image_ids(kontext_latent)
+            image_ids = pipe.dit.prepare_image_ids(kontext_latent, iterp_offset=2)
 
             # image_ids[..., 0] = 1
             # add reference offsets to image_ids
@@ -596,9 +594,6 @@ class FluxImageUnit_Kontext(PipelineUnit):
             # original concat in sequence dim
             kontext_latents = torch.concat(kontext_latents, dim=1)
             kontext_image_ids = torch.concat(kontext_image_ids, dim=-2)
-
-        # log(f"Kontext latents shape: {kontext_latents.shape}")
-        # log(f"Kontext image IDs shape: {kontext_image_ids.shape}")
 
         return {"kontext_latents": kontext_latents, "kontext_image_ids": kontext_image_ids}
 
@@ -750,6 +745,7 @@ def model_fn_flux_image(
     num_inference_steps=1,
     use_gradient_checkpointing=False,
     use_gradient_checkpointing_offload=False,
+    dit_3d_attn_interval=None,
     **kwargs
 ):
     if tiled:
@@ -814,9 +810,11 @@ def model_fn_flux_image(
     hidden_states = dit.patchify(hidden_states) # (B, S, C), S is the sequence length
 
     # Kontext
+    # log(f"hidden states shape: {hidden_states.shape}")
+    # log(f"kontext latents shape: {kontext_latents.shape}")
     if kontext_latents is not None:
-        image_ids = torch.concat([image_ids, kontext_image_ids], dim=-2) # (B, 2S, C), kontext image ids have the same sequence length S
-        hidden_states = torch.concat([hidden_states, kontext_latents], dim=1) # (B, 2S, C), kontext latents have the same sequence length S
+        image_ids = torch.concat([image_ids, kontext_image_ids], dim=-2)
+        hidden_states = torch.concat([hidden_states, kontext_latents], dim=1) # (B, S+T, C)
 
     hidden_states = dit.x_embedder(hidden_states)
 
@@ -838,8 +836,8 @@ def model_fn_flux_image(
     else:
         # Joint Blocks
         for block_id, block in enumerate(dit.blocks):
-            num_frames = hidden_states.shape[0] if block_id < len(dit.blocks) // 3 else 1
-            log(f"Double block {block_id} with number of frames: {num_frames}")
+            num_frames = hidden_states.shape[0] if dit_3d_attn_interval is not None and block_id < len(dit.blocks) // dit_3d_attn_interval else 1
+            # log(f"Double block {block_id} with number of frames: {num_frames}")
             hidden_states, prompt_emb = gradient_checkpoint_forward(
                 block,
                 use_gradient_checkpointing,
@@ -863,8 +861,8 @@ def model_fn_flux_image(
         hidden_states = torch.cat([prompt_emb, hidden_states], dim=1)
         num_joint_blocks = len(dit.blocks)
         for block_id, block in enumerate(dit.single_blocks):
-            num_frames = hidden_states.shape[0] if block_id < len(dit.single_blocks) // 3 else 1
-            log(f"Single block {block_id} with number of frames: {num_frames}")
+            num_frames = hidden_states.shape[0] if dit_3d_attn_interval is not None and block_id < len(dit.single_blocks) // dit_3d_attn_interval else 1
+            # log(f"Single block {block_id} with number of frames: {num_frames}")
             hidden_states, prompt_emb = gradient_checkpoint_forward(
                 block,
                 use_gradient_checkpointing,

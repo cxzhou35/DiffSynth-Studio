@@ -21,6 +21,7 @@ reportMissingImports = "warning"
 reportMissingTypeStubs = false
 reportPrivateImportUsage = false
 reportUnknownVariableType = false
+reportUnknownMemberType = false
 reportAssignmentType = false
 reportImplicitRelativeImport = false
 reportAny = false

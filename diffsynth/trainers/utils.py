@@ -639,6 +639,7 @@ def flux_parser():
     parser.add_argument("--temporal_window_size", type=int, default=4, help="Temporal window size for temporal sampling.")
     parser.add_argument("--use_spatial_sample", default=False, action="store_true", help="Whether to use spatial sampling for mv datasets.")
     parser.add_argument("--spatial_window_size", type=int, default=4, help="Spatial window size for spatial sampling.")
+    parser.add_argument("--dit_3d_attn_interval", type=int, default=4, help="Interval for Dit's 3D attention.")
     parser.add_argument("--model_paths", type=str, default=None, help="Paths to load models. In JSON format.")
     parser.add_argument("--model_id_with_origin_paths", type=str, default=None, help="Model ID with origin paths, e.g., Wan-AI/Wan2.1-T2V-1.3B:diffusion_pytorch_model*.safetensors. Comma-separated.")
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate.")

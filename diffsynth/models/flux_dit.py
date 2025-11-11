@@ -324,11 +324,15 @@ class FluxDiT(torch.nn.Module):
         return hidden_states
 
 
-    def prepare_image_ids(self, latents):
+    def prepare_image_ids(self, latents, iterp_offset=1):
         batch_size, _, height, width = latents.shape
         latent_image_ids = torch.zeros(height // 2, width // 2, 3) # half of the latent size for patchifying(2x2)
-        latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(height // 2)[:, None]
-        latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(width // 2)[None, :]
+        if iterp_offset > 1:
+            latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(0, height, iterp_offset)[:, None]
+            latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(0, width, iterp_offset)[None, :]
+        else:
+            latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(height // 2)[:, None]
+            latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(width // 2)[None, :]
 
         latent_image_id_height, latent_image_id_width, latent_image_id_channels = latent_image_ids.shape
 

@@ -23,6 +23,7 @@ class FluxTrainingModule(DiffusionTrainingModule):
         kontext_ref_offsets=None,
         use_fdl_loss=False,
         fdl_loss_weights=None,
+        dit_3d_attn_interval=None,
     ):
         super().__init__()
         # Load models
@@ -49,6 +50,7 @@ class FluxTrainingModule(DiffusionTrainingModule):
         self.kontext_ref_offsets = kontext_ref_offsets if kontext_ref_offsets is not None else [1, 0, 0]
         self.use_fdl_loss = use_fdl_loss
         self.fdl_loss_weights = fdl_loss_weights if use_fdl_loss else None
+        self.dit_3d_attn_interval = dit_3d_attn_interval
 
     def forward_preprocess(self, datas):
         # CFG-sensitive parameters
@@ -79,6 +81,7 @@ class FluxTrainingModule(DiffusionTrainingModule):
             "rand_device": self.pipe.device,
             "use_gradient_checkpointing": self.use_gradient_checkpointing,
             "use_gradient_checkpointing_offload": self.use_gradient_checkpointing_offload,
+            "dit_3d_attn_interval": self.dit_3d_attn_interval,
         }
 
         # Extra inputs
@@ -120,12 +123,19 @@ def main():
         spatial_window_size=args.spatial_window_size,
         main_data_operator=MultiVideoDataset.default_image_operator(
             base_path=args.dataset_base_path,
-            max_pixels=args.max_pixels,
             height=args.height,
             width=args.width,
             height_division_factor=16,
             width_division_factor=16,
-        )
+        ),
+        special_operator_map={
+            "kontext_images": MultiVideoDataset.default_image_operator(
+                base_path=args.dataset_base_path,
+                max_pixels=args.max_pixels,
+                height_division_factor=16,
+                width_division_factor=16,
+            ),
+        }
     )
 
     # load model
@@ -145,6 +155,7 @@ def main():
         kontext_ref_offsets=args.kontext_ref_offsets,
         use_fdl_loss=args.use_fdl_loss,
         fdl_loss_weights=args.fdl_loss_weights,
+        dit_3d_attn_interval=args.dit_3d_attn_interval,
     )
 
     # set logger

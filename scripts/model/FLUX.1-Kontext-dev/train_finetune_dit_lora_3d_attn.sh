@@ -8,7 +8,7 @@ SCENE_ID="neemo_mini_1440p_120f"
 TIMESTAMP=$(date +"%Y%m%d%H%M%S")
 DATASET_BASE_PATH="data/${SCENE_ID}"
 DATASET_METADATA_PATH="${DATASET_BASE_PATH}/metadata.json"
-OUTPUT_PATH="outputs/${SCENE_ID}_${TIMESTAMP}/FLUX.1-Kontext-dev-lora/models"
+OUTPUT_PATH="outputs/${SCENE_ID}_${TIMESTAMP}/FLUX.1-Kontext-dev-lora-3d_attn_window_size_3/models"
 # MAX_PIXELS=3686400 # 2560x1440
 MAX_PIXELS=921600 # 1280x720 for kontext images
 IMG_HEIGHT=1440
@@ -24,6 +24,8 @@ accelerate launch --mixed_precision=bf16 --multi_gpu --main_process_port 29501 -
   --height $IMG_HEIGHT \
   --width $IMG_WIDTH \
   --dataset_repeat $DATASET_REPEAT \
+  --use_temporal_sample \
+  --temporal_window_size 3 \
   --kontext_ref_offsets 1 0 0 \
   --model_id_with_origin_paths "black-forest-labs/FLUX.1-Kontext-dev:flux1-kontext-dev.safetensors,black-forest-labs/FLUX.1-dev:text_encoder/model.safetensors,black-forest-labs/FLUX.1-dev:text_encoder_2/,black-forest-labs/FLUX.1-dev:ae.safetensors" \
   --learning_rate 1e-4 \
@@ -36,3 +38,5 @@ accelerate launch --mixed_precision=bf16 --multi_gpu --main_process_port 29501 -
   --align_to_opensource_format \
   --extra_inputs "kontext_images" \
   --use_gradient_checkpointing \
+  --use_gradient_checkpointing_offload \
+  --dit_3d_attn_interval 3 \
