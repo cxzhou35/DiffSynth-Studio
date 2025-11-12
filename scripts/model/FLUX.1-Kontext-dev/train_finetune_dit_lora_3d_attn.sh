@@ -4,10 +4,10 @@ export NUM_NODES=1
 export NUM_GPUS=4
 
 # get time now
-SCENE_ID="neemo_mini_1440p_120f"
+SCENE_ID="old_tim_1440p_120f"
 TIMESTAMP=$(date +"%Y%m%d%H%M%S")
 DATASET_BASE_PATH="data/${SCENE_ID}"
-DATASET_METADATA_PATH="${DATASET_BASE_PATH}/metadata.json"
+DATASET_METADATA_PATH="${DATASET_BASE_PATH}/kontext_data/metadata.json"
 OUTPUT_PATH="outputs/${SCENE_ID}_${TIMESTAMP}/FLUX.1-Kontext-dev-lora-3d_attn_window_size_3/models"
 # MAX_PIXELS=3686400 # 2560x1440
 MAX_PIXELS=921600 # 1280x720 for kontext images
