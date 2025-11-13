@@ -7,6 +7,7 @@ from diffsynth.models.lora import FluxLoRAConverter
 from diffsynth.data.mvdata import MultiVideoDataset
 
 from diffsynth.models.flux_vae_al import wrap_vae_with_al
+from diffsynth.utils.base_utils import DotDict
 
 
 class FluxTrainingModule(DiffusionTrainingModule):
@@ -23,6 +24,8 @@ class FluxTrainingModule(DiffusionTrainingModule):
         kontext_ref_offsets=None,
         use_fdl_loss=False,
         fdl_loss_weights=None,
+        temporal_window_size=1,
+        spatial_window_size=1,
         dit_3d_attn_interval=None,
     ):
         super().__init__()
@@ -50,6 +53,8 @@ class FluxTrainingModule(DiffusionTrainingModule):
         self.kontext_ref_offsets = kontext_ref_offsets if kontext_ref_offsets is not None else [1, 0, 0]
         self.use_fdl_loss = use_fdl_loss
         self.fdl_loss_weights = fdl_loss_weights if use_fdl_loss else None
+        self.temporal_window_size= temporal_window_size
+        self.spatial_window_size = spatial_window_size
         self.dit_3d_attn_interval = dit_3d_attn_interval
 
     def forward_preprocess(self, datas):
@@ -81,6 +86,8 @@ class FluxTrainingModule(DiffusionTrainingModule):
             "rand_device": self.pipe.device,
             "use_gradient_checkpointing": self.use_gradient_checkpointing,
             "use_gradient_checkpointing_offload": self.use_gradient_checkpointing_offload,
+            "temporal_window_size": self.temporal_window_size,
+            "spatial_window_size": self.spatial_window_size,
             "dit_3d_attn_interval": self.dit_3d_attn_interval,
         }
 
@@ -112,31 +119,35 @@ def main():
     args = parser.parse_args()
 
     # create dataset from metadata
-    dataset = MultiVideoDataset(
-        base_path=args.dataset_base_path,
-        metadata_path=args.dataset_metadata_path,
-        repeat=args.dataset_repeat,
-        data_file_keys=args.data_file_keys.split(","),
-        use_temporal_sample=args.use_temporal_sample,
-        temporal_window_size=args.temporal_window_size,
-        use_spatial_sample=args.use_spatial_sample,
-        spatial_window_size=args.spatial_window_size,
-        main_data_operator=MultiVideoDataset.default_image_operator(
+    datasets = Dotdict()
+    for split in ['train', 'val']:
+        metadata_path = args.dataset_metadata_path.replace("train", split)
+        dataset = MultiVideoDataset(
             base_path=args.dataset_base_path,
-            height=args.height,
-            width=args.width,
-            height_division_factor=16,
-            width_division_factor=16,
-        ),
-        special_operator_map={
-            "kontext_images": MultiVideoDataset.default_image_operator(
+            metadata_path=metadata_path,
+            repeat=args.dataset_repeat,
+            data_file_keys=args.data_file_keys.split(","),
+            use_temporal_sample=args.use_temporal_sample,
+            temporal_window_size=args.temporal_window_size,
+            use_spatial_sample=args.use_spatial_sample,
+            spatial_window_size=args.spatial_window_size,
+            main_data_operator=MultiVideoDataset.default_image_operator(
                 base_path=args.dataset_base_path,
-                max_pixels=args.max_pixels,
+                height=args.height,
+                width=args.width,
                 height_division_factor=16,
                 width_division_factor=16,
             ),
-        }
-    )
+            special_operator_map={
+                "kontext_images": MultiVideoDataset.default_image_operator(
+                    base_path=args.dataset_base_path,
+                    max_pixels=args.max_pixels,
+                    height_division_factor=16,
+                    width_division_factor=16,
+                ),
+            }
+        )
+        datasets.update({split: dataset})
 
     # load model
     model = FluxTrainingModule(
@@ -155,6 +166,8 @@ def main():
         kontext_ref_offsets=args.kontext_ref_offsets,
         use_fdl_loss=args.use_fdl_loss,
         fdl_loss_weights=args.fdl_loss_weights,
+        temporal_window_size=args.temporal_window_size,
+        spatial_window_size=args.spatial_window_size,
         dit_3d_attn_interval=args.dit_3d_attn_interval,
     )
 
@@ -163,9 +176,10 @@ def main():
         args.output_path,
         remove_prefix_in_ckpt=args.remove_prefix_in_ckpt,
         state_dict_converter=FluxLoRAConverter.align_to_opensource_format if args.align_to_opensource_format else lambda x:x,
+        val_dataset=datasets['val'],
     )
 
-    launch_training_task(dataset, model, model_logger, args=args)
+    launch_training_task(datasets['train'], model, model_logger, args=args)
 
 def set_env():
     os.environ["TOKENIZERS_PARALLELISM"] = "false"

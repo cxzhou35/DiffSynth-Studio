@@ -20,9 +20,11 @@ typeCheckingMode = "off"
 reportMissingImports = "warning"
 reportMissingTypeStubs = false
 reportPrivateImportUsage = false
+reportMissingParameterType = false
 reportUnknownVariableType = false
 reportUnknownMemberType = false
 reportAssignmentType = false
+reportArgumentType = false
 reportImplicitRelativeImport = false
 reportAny = false
 

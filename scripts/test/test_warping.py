@@ -15,7 +15,7 @@ import numpy as np
 from glob import glob
 from itertools import product
 from typing import List
-from diffsynth.utils.noise_util import get_noise_from_video
+from diffsynth.utils.noise_utils import get_noise_from_video
 
 def main(image_paths: List[str], output_dir:str, image_height:int, image_width:int):
     """

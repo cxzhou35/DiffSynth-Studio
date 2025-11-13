@@ -11,7 +11,7 @@ OUTPUT_DIR="outputs/old_tim_1440p_180f/train_lora_finetune/inference/test_data_e
 
 # for loop to the DIR
 for d in "${DIR[@]}"; do
-    CUDA_VISIBLE_DEVICES=0 python3 scripts/model/infer.py \
+    CUDA_VISIBLE_DEVICES=0 python3 scripts/model/infer_controlnet.py \
         --control_image "$CONTROL_IMAGE/$d" \
         --prompt "${PROMPT}" \
         --height $HEIGHT \

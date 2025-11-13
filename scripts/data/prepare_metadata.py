@@ -86,6 +86,7 @@ def parse_args():
     parser.add_argument("-p", "--prompt", type=str, default="test prompt", help="Input prompt")
     parser.add_argument("-mt", "--meta_type", type=str, default="json", help="File type of metadata")
     parser.add_argument("-ct", "--cond_type", type=str, default="controlnet", help="Condition type (etc. controlnet, kontext)")
+    parser.add_argument("-s", "--split", type=str, default="train", help="Dataset split (train, test, eval)")
     parser.add_argument("-rp", "--remove_prefix", type=str, default="data/old_tim_1440p_120f/", help="Remove prefix in path")
 
     parse_args = parser.parse_args()
@@ -100,10 +101,11 @@ def main():
     prompt = args.prompt
     meta_type = args.meta_type
     cond_type = args.cond_type
+    split = args.split
     remove_prefix = args.remove_prefix
 
     os.makedirs(output_dir, exist_ok=True)
-    metafile_path = os.path.join(output_dir, f"metadata.{meta_type}")
+    metafile_path = os.path.join(output_dir, f"metadata_{split}.{meta_type}")
     total_pair_num = construct_cond_data(image_dir, cond_image_dir, prompt, metafile_path, cond_type, remove_prefix)
     log(f"Constructed {total_pair_num} {cond_type} condition data pairs.")
     log(f"Saved metadata to {metafile_path}")

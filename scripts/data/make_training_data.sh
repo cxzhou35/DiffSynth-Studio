@@ -13,6 +13,7 @@ for COND_TYPE in "${COND_TYPES[@]}"; do
         --cond_image_dir $COND_IMAGE_DIR \
         --output_dir ${DATA_ROOT}/${COND_TYPE}_data \
         --prompt "${PROMPT}" \
-        --meta_type csv \
-        --cond_type ${COND_TYPE}
+        --meta_type json \
+        --cond_type ${COND_TYPE} \
+        --split train
 done

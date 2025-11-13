@@ -1,9 +1,4 @@
-
-from typing import Never
 import imageio, os, torch, warnings, torchvision, argparse, json
-import math
-import shutil
-from functools import partial
 from ..utils import ModelConfig
 from ..models.utils import load_state_dict
 from peft import LoraConfig, inject_adapter_in_model
@@ -12,8 +7,11 @@ import pandas as pd
 from tqdm import tqdm
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration
-# from ..tools.vis_util import caption_batch
-# from ..tools.rand_util import init_global_seed, worker_init_fn_base, get_rand_seed
+from ..tools.vis_util import caption_batch
+from ..tools.rand_util import init_global_seed, worker_init_fn_base, get_rand_seed
+from functools import partial
+import math
+import shutil
 
 
 
@@ -36,7 +34,7 @@ class ImageDataset(torch.utils.data.Dataset):
             max_pixels = args.max_pixels
             data_file_keys = args.data_file_keys.split(",")
             repeat = args.dataset_repeat
-
+            
         self.base_path = base_path
         self.max_pixels = max_pixels
         self.height = height
@@ -53,7 +51,7 @@ class ImageDataset(torch.utils.data.Dataset):
         elif height is None and width is None:
             print("Height and width are none. Setting `dynamic_resolution` to True.")
             self.dynamic_resolution = True
-
+            
         if metadata_path is None:
             print("No metadata. Trying to generate it.")
             metadata = self.generate_metadata(base_path)
@@ -95,8 +93,8 @@ class ImageDataset(torch.utils.data.Dataset):
         metadata["image"] = image_list
         metadata["prompt"] = prompt_list
         return metadata
-
-
+    
+    
     def crop_and_resize(self, image, target_height, target_width):
         width, height = image.size
         scale = max(target_width / width, target_height / height)
@@ -107,8 +105,8 @@ class ImageDataset(torch.utils.data.Dataset):
         )
         image = torchvision.transforms.functional.center_crop(image, (target_height, target_width))
         return image
-
-
+    
+    
     def get_height_width(self, image):
         if self.dynamic_resolution:
             width, height = image.size
@@ -120,14 +118,14 @@ class ImageDataset(torch.utils.data.Dataset):
         else:
             height, width = self.height, self.width
         return height, width
-
-
+    
+    
     def load_image(self, file_path):
         image = Image.open(file_path).convert("RGB")
         image = self.crop_and_resize(image, *self.get_height_width(image))
         return image
-
-
+    
+    
     def load_data(self, file_path):
         return self.load_image(file_path)
 
@@ -146,7 +144,7 @@ class ImageDataset(torch.utils.data.Dataset):
                     warnings.warn(f"cannot load file {data[key]}.")
                     return None
         return data
-
+    
 
     def __len__(self):
         return len(self.data) * self.repeat
@@ -176,7 +174,7 @@ class VideoDataset(torch.utils.data.Dataset):
             num_frames = args.num_frames
             data_file_keys = args.data_file_keys.split(",")
             repeat = args.dataset_repeat
-
+        
         self.base_path = base_path
         self.num_frames = num_frames
         self.time_division_factor = time_division_factor
@@ -190,14 +188,14 @@ class VideoDataset(torch.utils.data.Dataset):
         self.image_file_extension = image_file_extension
         self.video_file_extension = video_file_extension
         self.repeat = repeat
-
+        
         if height is not None and width is not None:
             print("Height and width are fixed. Setting `dynamic_resolution` to False.")
             self.dynamic_resolution = False
         elif height is None and width is None:
             print("Height and width are none. Setting `dynamic_resolution` to True.")
             self.dynamic_resolution = True
-
+            
         if metadata_path is None:
             print("No metadata. Trying to generate it.")
             metadata = self.generate_metadata(base_path)
@@ -210,8 +208,8 @@ class VideoDataset(torch.utils.data.Dataset):
         else:
             metadata = pd.read_csv(metadata_path)
             self.data = [metadata.iloc[i].to_dict() for i in range(len(metadata))]
-
-
+            
+    
     def generate_metadata(self, folder):
         video_list, prompt_list = [], []
         file_set = set(os.listdir(folder))
@@ -233,8 +231,8 @@ class VideoDataset(torch.utils.data.Dataset):
         metadata["video"] = video_list
         metadata["prompt"] = prompt_list
         return metadata
-
-
+        
+        
     def crop_and_resize(self, image, target_height, target_width):
         width, height = image.size
         scale = max(target_width / width, target_height / height)
@@ -245,8 +243,8 @@ class VideoDataset(torch.utils.data.Dataset):
         )
         image = torchvision.transforms.functional.center_crop(image, (target_height, target_width))
         return image
-
-
+    
+    
     def get_height_width(self, image):
         if self.dynamic_resolution:
             width, height = image.size
@@ -258,8 +256,8 @@ class VideoDataset(torch.utils.data.Dataset):
         else:
             height, width = self.height, self.width
         return height, width
-
-
+    
+    
     def get_num_frames(self, reader):
         num_frames = self.num_frames
         if int(reader.count_frames()) < num_frames:
@@ -267,7 +265,7 @@ class VideoDataset(torch.utils.data.Dataset):
             while num_frames > 1 and num_frames % self.time_division_factor != self.time_division_remainder:
                 num_frames -= 1
         return num_frames
-
+    
     def _load_gif(self, file_path):
         gif_img = Image.open(file_path)
         frame_count = 0
@@ -275,9 +273,9 @@ class VideoDataset(torch.utils.data.Dataset):
         while True:
             delay = gif_img.info.get('duration', 100) # ms
             delays.append(delay)
-            rgb_frame = gif_img.convert("RGB")
+            rgb_frame = gif_img.convert("RGB")   
             croped_frame = self.crop_and_resize(rgb_frame, *self.get_height_width(rgb_frame))
-            frames.append(croped_frame)
+            frames.append(croped_frame)             
             frame_count += 1
             try:
                 gif_img.seek(frame_count)
@@ -285,7 +283,7 @@ class VideoDataset(torch.utils.data.Dataset):
                 break
         # delays canbe used to calculate framerates
         # i guess it is better to sample images with stable interval,
-        # and using minimal_interval as the interval,
+        # and using minimal_interval as the interval, 
         # and framerate = 1000 / minimal_interval
         if any((delays[0] != i) for i in delays):
             minimal_interval = min([i for i in delays if i > 0])
@@ -311,7 +309,7 @@ class VideoDataset(torch.utils.data.Dataset):
                 num_frames -= 1
         frames = frames[:num_frames]
         return frames
-
+    
     def load_video(self, file_path):
         if file_path.lower().endswith(".gif"):
             return self._load_gif(file_path)
@@ -325,25 +323,25 @@ class VideoDataset(torch.utils.data.Dataset):
             frames.append(frame)
         reader.close()
         return frames
-
-
+    
+    
     def load_image(self, file_path):
         image = Image.open(file_path).convert("RGB")
         image = self.crop_and_resize(image, *self.get_height_width(image))
         frames = [image]
         return frames
-
-
+    
+    
     def is_image(self, file_path):
         file_ext_name = file_path.split(".")[-1]
         return file_ext_name.lower() in self.image_file_extension
-
-
+    
+    
     def is_video(self, file_path):
         file_ext_name = file_path.split(".")[-1]
         return file_ext_name.lower() in self.video_file_extension
-
-
+    
+    
     def load_data(self, file_path):
         if self.is_image(file_path):
             return self.load_image(file_path)
@@ -363,7 +361,7 @@ class VideoDataset(torch.utils.data.Dataset):
                     warnings.warn(f"cannot load file {data[key]}.")
                     return None
         return data
-
+    
 
     def __len__(self):
         return len(self.data) * self.repeat
@@ -373,25 +371,25 @@ class VideoDataset(torch.utils.data.Dataset):
 class DiffusionTrainingModule(torch.nn.Module):
     def __init__(self):
         super().__init__()
-
-
+        
+        
     def to(self, *args, **kwargs):
         for name, model in self.named_children():
             model.to(*args, **kwargs)
         return self
-
-
+        
+        
     def trainable_modules(self):
         trainable_modules = filter(lambda p: p.requires_grad, self.parameters())
         return trainable_modules
-
-
+    
+    
     def trainable_param_names(self):
         trainable_param_names = list(filter(lambda named_param: named_param[1].requires_grad, self.named_parameters()))
         trainable_param_names = set([named_param[0] for named_param in trainable_param_names])
         return trainable_param_names
-
-
+    
+    
     def add_lora_to_model(self, model, target_modules, lora_rank, lora_alpha=None, upcast_dtype=None):
         if lora_alpha is None:
             lora_alpha = lora_rank
@@ -426,8 +424,8 @@ class DiffusionTrainingModule(torch.nn.Module):
                 state_dict_[name] = param
             state_dict = state_dict_
         return state_dict
-
-
+    
+    
     def transfer_data_to_device(self, data, device, torch_float_dtype=None):
         for key in data:
             if isinstance(data[key], torch.Tensor):
@@ -435,8 +433,8 @@ class DiffusionTrainingModule(torch.nn.Module):
                 if torch_float_dtype is not None and data[key].dtype in [torch.float, torch.float16, torch.bfloat16]:
                     data[key] = data[key].to(torch_float_dtype)
         return data
-
-
+    
+    
     def parse_model_configs(self, model_paths, model_id_with_origin_paths, enable_fp8_training=False):
         offload_dtype = torch.float8_e4m3fn if enable_fp8_training else None
         model_configs = []
@@ -447,8 +445,8 @@ class DiffusionTrainingModule(torch.nn.Module):
             model_id_with_origin_paths = model_id_with_origin_paths.split(",")
             model_configs += [ModelConfig(model_id=i.split(":")[0], origin_file_pattern=i.split(":")[1], offload_dtype=offload_dtype) for i in model_id_with_origin_paths]
         return model_configs
-
-
+    
+    
     def switch_pipe_to_training_mode(
         self,
         pipe,
@@ -458,14 +456,14 @@ class DiffusionTrainingModule(torch.nn.Module):
     ):
         # Scheduler
         pipe.scheduler.set_timesteps(1000, training=True)
-
+        
         # Freeze untrainable models
         pipe.freeze_except([] if trainable_models is None else trainable_models.split(","))
-
+        
         # Enable FP8 if pipeline supports
         if enable_fp8_training and hasattr(pipe, "_enable_fp8_lora_training"):
             pipe._enable_fp8_lora_training(torch.float8_e4m3fn)
-
+        
         # Add LoRA to the base models
         if lora_base_model is not None:
             model = self.add_lora_to_model(
@@ -485,73 +483,108 @@ class DiffusionTrainingModule(torch.nn.Module):
 
 
 class ModelLogger:
-    def __init__(self, output_path, remove_prefix_in_ckpt=None, state_dict_converter=lambda x:x):
+    def __init__(self, output_path, remove_prefix_in_ckpt=None, state_dict_converter=lambda x:x, condition_mode="plus"):
         self.output_path = output_path
         self.remove_prefix_in_ckpt = remove_prefix_in_ckpt
         self.state_dict_converter = state_dict_converter
         self.num_steps = 0
-        self.val_dataset = None
         self.steps_per_epoch = None
+        self.condition_mode = condition_mode
+        self.dataset_dict = None
 
 
-    def on_step_end(self, accelerator, model, save_steps=None, val_steps=None):
+    def on_step_end(self, accelerator, model, save_steps=None, validate_steps=None):
         self.num_steps += 1
-        epoch_idx = 0 if self.num_steps < self.steps_per_epoch else self.num_steps//self.steps_per_epoch-1
         if save_steps is not None and self.num_steps % save_steps == 0:
-            self.save_model(accelerator, model, f"epoch-{epoch_idx}-step-{self.num_steps}.safetensors")
-        if val_steps is not None and self.num_steps % val_steps == 0:
-            self.validate_model(accelerator, model, f"epoch-{epoch_idx}-step-{self.num_steps}")
+            if self.steps_per_epoch is not None and (self.num_steps % self.steps_per_epoch) < save_steps:
+                epoch_id = self.num_steps // self.steps_per_epoch - 1
+                self.save_model(accelerator, model, f"step-{self.num_steps}-epoch-{epoch_id}.safetensors")
+            else:
+                self.save_model(accelerator, model, f"step-{self.num_steps}.safetensors")
+        if validate_steps is not None and self.num_steps % validate_steps == 0:
+            self.validate_model(accelerator, model, f"step-{self.num_steps}")
 
 
     def on_epoch_end(self, accelerator, model, epoch_id):
-        self.save_model(accelerator, model, f"epoch-{epoch_id}-step-{self.num_steps}.safetensors")
-        self.validate_model(accelerator, model, f"epoch-{epoch_id}-step-{self.num_steps}")
+        self.save_model(accelerator, model, f"step-{self.num_steps}-epoch-{epoch_id}.safetensors")
+        self.validate_model(accelerator, model, f"epoch-{epoch_id}")
 
 
-    def on_training_end(self, accelerator, model, save_steps=None):
+    def on_training_end(self, accelerator, model, save_steps=None, validate_steps=None): #TODO: use validate_steps
         if save_steps is not None and self.num_steps % save_steps != 0:
             self.save_model(accelerator, model, f"step-{self.num_steps}.safetensors")
 
 
-    def save_model(self, accelerator, model, file_name):
+    def save_model(self, accelerator, model, file_name, save_whole=True):
         accelerator.wait_for_everyone()
         if accelerator.is_main_process:
-            state_dict = accelerator.get_state_dict(model)
-            state_dict = accelerator.unwrap_model(model).export_trainable_state_dict(state_dict, remove_prefix=self.remove_prefix_in_ckpt)
-            state_dict = self.state_dict_converter(state_dict)
-            save_dir = os.path.join(self.output_path, "models")
-            os.makedirs(save_dir, exist_ok=True)
-            path = os.path.join(save_dir, file_name)
-            accelerator.save(state_dict, path, safe_serialization=True)
+            if save_whole:
+                #TODO: "checkpoint" can be edited
+                if os.path.exists(os.path.join(self.output_path, "checkpoint")):
+                    checkpoints = os.listdir(os.path.join(self.output_path, "checkpoint"))
+                    checkpoints = [d for d in checkpoints if "epoch" not in d]
+                    checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
 
+                    # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
+                    if len(checkpoints) >= 3: #TODO: 3 can be edited
+                        num_to_remove = len(checkpoints) - 2 #TODO: 2 can be edited
+                        removing_checkpoints = checkpoints[0:num_to_remove]
 
-    def validate_model(self, accelerator, model, eval_dir):
-        # TODO: add validation codes
+                        accelerator.print(f"removing checkpoints: {', '.join(removing_checkpoints)}")
+
+                        for removing_checkpoint in removing_checkpoints:
+                            removing_checkpoint = os.path.join(self.output_path, "checkpoint", removing_checkpoint)
+                            shutil.rmtree(removing_checkpoint)
+
+                save_path = os.path.join(self.output_path, "checkpoint", os.path.splitext(file_name)[0])
+                accelerator.save_state(save_path)
+            else:
+                state_dict = accelerator.get_state_dict(model)
+                state_dict = accelerator.unwrap_model(model).export_trainable_state_dict(state_dict, remove_prefix=self.remove_prefix_in_ckpt)
+                state_dict = self.state_dict_converter(state_dict)
+                os.makedirs(self.output_path, exist_ok=True)
+                path = os.path.join(self.output_path, file_name)
+                accelerator.save(state_dict, path, safe_serialization=True)
         accelerator.wait_for_everyone()
-        unwrapped_model = accelerator.unwrap_model(model)
-        proc_index = accelerator.process_index
-        num_proc = accelerator.num_processes
-        with torch.no_grad():
-            eval_save_dir = os.path.join(self.output_path, "evals", eval_dir, exist_ok=True)
-            os.makedirs(eval_save_dir)
-            for data_id, datas in enumerate(dataset_loader):
-                result_images = unwrapped_model.pipe(
-                    input_image=[data["image"] for data in datas],
-                    height=datas[0]["image"].size[1],
-                    width=data[0]["image"].size[0],
-                    kontext_images=[data["kontext_images"] for data in datas],
-                )
-                for idx, data in enumerate(datas):
-                    save_image = [data["kontext_images"], result_images[idx, ...], data["image"]]
-                    total_width = data["image"].size[0] * 3
-                    height = data["image"].size[1]
-                    new_image = Image.new('RGB', (total_width, height))
-                    x_offset = 0
-                    for image in save_image:
-                        new_img.paste(im, (x_offset, 0))
-                        x_offset += im.width
-                    result_path = os.path.join(eval_save_dir, f"{(data_id * num_proc + proc_index):03d}.png")
-                    new_img.save(result_path)
+
+
+    def validate_model(self, accelerator, model, folder_str):
+        if self.dataset_dict is not None:
+            unwrapped_model = accelerator.unwrap_model(model)
+            proc_index = accelerator.process_index
+            num_proc = accelerator.num_processes
+            with torch.no_grad():
+                for dataset_name, dataset_loader in self.dataset_dict.items():
+                    os.makedirs(os.path.join(self.output_path, dataset_name, folder_str), exist_ok=True)
+                    for data_id, data in enumerate(dataset_loader):
+                        if data_id >= 1: #TODO: can be edited
+                            break
+                        result_img = unwrapped_model.pipe( #TODO: for relight
+                            input_image = data["image"],
+                            condition_flatlit = data["condition_flatlit"],
+                            condition_shading = data["condition_shading"] if "condition_shading" in data else None,
+                            light_dir = data["light_dir"],
+                            condition_mode = self.condition_mode,
+                            height = data["image"].size[1],
+                            width = data["image"].size[0]
+                        )
+                        if "condition_shading" in data:
+                            imgs = [data["condition_flatlit"], data["condition_shading"], result_img, data["image"]]
+                            total_width = data["image"].size[0] * 4
+                        else:
+                            imgs = [data["condition_flatlit"], result_img, data["image"]]
+                            total_width = data["image"].size[0] * 3
+                        height = data["image"].size[1]
+                        new_img = Image.new('RGB', (total_width, height))
+                        x_offset = 0
+                        for im in imgs:
+                            new_img.paste(im, (x_offset, 0))
+                            x_offset += im.width
+                        caption_batch(new_img, data)
+                        result_path = os.path.join(self.output_path, dataset_name, folder_str, f"{(data_id * num_proc + proc_index):03d}.png")
+                        new_img.save(result_path)
+            unwrapped_model.pipe.scheduler.set_timesteps(1000, training=True) #TODO
+        accelerator.wait_for_everyone()
 
 
 def launch_training_task(
@@ -562,7 +595,7 @@ def launch_training_task(
     weight_decay: float = 1e-2,
     num_workers: int = 8,
     save_steps: int = None,
-    val_steps: int = None,
+    validate_steps: int = None,
     num_epochs: int = 1,
     gradient_accumulation_steps: int = 1,
     find_unused_parameters: bool = False,
@@ -580,14 +613,14 @@ def launch_training_task(
         weight_decay = args.weight_decay
         num_workers = args.dataset_num_workers
         save_steps = args.save_steps
-        val_steps = args.validate_steps
+        validate_steps = args.validate_steps
         num_epochs = args.num_epochs
         gradient_accumulation_steps = args.gradient_accumulation_steps
         find_unused_parameters = args.find_unused_parameters
         output_dir = args.output_path
         load_from_latest = args.resume_from_checkpoint
         tracker_config = dict(vars(args))
-
+    
     optimizer = torch.optim.AdamW(model.trainable_modules(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer)
 
@@ -615,15 +648,15 @@ def launch_training_task(
                 num_workers=1,
                 worker_init_fn=worker_init_fn,
             )
-
+    
     val_keys = tuple(val_dataloader_dict.keys())
     model, optimizer, dataloader, scheduler, *rest = accelerator.prepare(model, optimizer, dataloader, scheduler, *val_dataloader_dict.values())
     val_dataloader_dict = dict(zip(val_keys, rest))
     if len(val_dataloader_dict) > 0:
-        model_logger.val_dataset = val_dataloader_dict
+        model_logger.dataset_dict = val_dataloader_dict
     if accelerator.is_main_process:
         accelerator.init_trackers("train_ver0", tracker_config) #TODO: "train_ver0" can be edited
-
+    
     first_epoch = 0
     if load_from_latest and os.path.exists(os.path.join(output_dir, "checkpoint")):
         dirs = os.listdir(os.path.join(output_dir, "checkpoint"))
@@ -651,7 +684,7 @@ def launch_training_task(
     accelerator.print(f"dataset length: {len(dataset)}")
     accelerator.print(f"dataloader length: {len(dataloader)}")
     accelerator.print(f"steps per epoch: {model_logger.steps_per_epoch}")
-
+    
     for epoch_id in range(first_epoch, num_epochs):
         tq_dataloader = tqdm(dataloader, desc="Steps", disable=not accelerator.is_local_main_process)
         for data in tq_dataloader:
@@ -669,13 +702,13 @@ def launch_training_task(
                 avg_loss = accelerator.gather(loss.repeat(1)).mean()
                 train_loss += avg_loss.item() / gradient_accumulation_steps
             if accelerator.sync_gradients:
-                model_logger.on_step_end(accelerator, model, save_steps, val_steps)
+                model_logger.on_step_end(accelerator, model, save_steps, validate_steps)
                 accelerator.log({"train_loss": train_loss}, step=model_logger.num_steps)
                 logs = {"step_loss": train_loss, "epoch": epoch_id}
                 tq_dataloader.set_postfix(**logs)
         # if save_steps is None:
         model_logger.on_epoch_end(accelerator, model, epoch_id)
-    model_logger.on_training_end(accelerator, model, save_steps, val_steps)
+    model_logger.on_training_end(accelerator, model, save_steps, validate_steps)
 
     accelerator.wait_for_everyone()
     accelerator.end_training()
@@ -689,11 +722,11 @@ def launch_data_process_task(
 ):
     if args is not None:
         num_workers = args.dataset_num_workers
-
+        
     dataloader = torch.utils.data.DataLoader(dataset, shuffle=False, collate_fn=lambda x: x[0], num_workers=num_workers)
     accelerator = Accelerator()
     model, dataloader = accelerator.prepare(model, dataloader)
-
+    
     for data_id, data in tqdm(enumerate(dataloader)):
         with accelerator.accumulate(model):
             with torch.no_grad():
@@ -717,7 +750,6 @@ def wan_parser():
     parser.add_argument("--dataset_repeat", type=int, default=1, help="Number of times to repeat the dataset per epoch.")
     parser.add_argument("--model_paths", type=str, default=None, help="Paths to load models. In JSON format.")
     parser.add_argument("--model_id_with_origin_paths", type=str, default=None, help="Model ID with origin paths, e.g., Wan-AI/Wan2.1-T2V-1.3B:diffusion_pytorch_model*.safetensors. Comma-separated.")
-    parser.add_argument("--audio_processor_config", type=str, default=None, help="Model ID with origin paths to the audio processor config, e.g., Wan-AI/Wan2.2-S2V-14B:wav2vec2-large-xlsr-53-english/")
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate.")
     parser.add_argument("--num_epochs", type=int, default=1, help="Number of epochs.")
     parser.add_argument("--output_path", type=str, default="./models", help="Output save path.")
@@ -744,16 +776,14 @@ def flux_parser():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
     parser.add_argument("--dataset_base_path", type=str, default="", required=True, help="Base path of the dataset.")
     parser.add_argument("--dataset_metadata_path", type=str, default=None, help="Path to the metadata file of the dataset.")
+    parser.add_argument("--condition_mode", type=str, default="plus", help="Mode of condition, [plus, concat, kontext, redux]")
+    parser.add_argument("--use_shading", default=False, action="store_true", help="Whether to use shading condition.")
+    parser.add_argument("--bg_color", type=int, default=None, help="What color to use in background.")
     parser.add_argument("--max_pixels", type=int, default=1024*1024, help="Maximum number of pixels per frame, used for dynamic resolution..")
     parser.add_argument("--height", type=int, default=None, help="Height of images. Leave `height` and `width` empty to enable dynamic resolution.")
     parser.add_argument("--width", type=int, default=None, help="Width of images. Leave `height` and `width` empty to enable dynamic resolution.")
     parser.add_argument("--data_file_keys", type=str, default="image", help="Data file keys in the metadata. Comma-separated.")
     parser.add_argument("--dataset_repeat", type=int, default=1, help="Number of times to repeat the dataset per epoch.")
-    parser.add_argument("--use_temporal_sample", default=False, action="store_true", help="Whether to use temporal sampling for mv datasets.")
-    parser.add_argument("--temporal_window_size", type=int, default=4, help="Temporal window size for temporal sampling.")
-    parser.add_argument("--use_spatial_sample", default=False, action="store_true", help="Whether to use spatial sampling for mv datasets.")
-    parser.add_argument("--spatial_window_size", type=int, default=4, help="Spatial window size for spatial sampling.")
-    parser.add_argument("--dit_3d_attn_interval", type=int, default=4, help="Interval for Dit's 3D attention.")
     parser.add_argument("--model_paths", type=str, default=None, help="Paths to load models. In JSON format.")
     parser.add_argument("--model_id_with_origin_paths", type=str, default=None, help="Model ID with origin paths, e.g., Wan-AI/Wan2.1-T2V-1.3B:diffusion_pytorch_model*.safetensors. Comma-separated.")
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate.")
@@ -767,7 +797,6 @@ def flux_parser():
     parser.add_argument("--resume_from_checkpoint", default=False, action="store_true", help="Whether to use pretrained checkpoint.")
     parser.add_argument("--lora_checkpoint", type=str, default=None, help="Path to the LoRA checkpoint. If provided, LoRA will be loaded from this checkpoint.")
     parser.add_argument("--extra_inputs", default=None, help="Additional model inputs, comma-separated.")
-    parser.add_argument("--kontext_ref_offsets", nargs=3, type=int, default=[1, 0, 0], help="Reference frame offsets for kontext module.")
     parser.add_argument("--align_to_opensource_format", default=False, action="store_true", help="Whether to align the lora format to opensource format. Only for DiT's LoRA.")
     parser.add_argument("--use_gradient_checkpointing", default=False, action="store_true", help="Whether to use gradient checkpointing.")
     parser.add_argument("--use_gradient_checkpointing_offload", default=False, action="store_true", help="Whether to offload gradient checkpointing to CPU memory.")
@@ -777,10 +806,6 @@ def flux_parser():
     parser.add_argument("--validate_steps", type=int, default=None, help="Number of validation invervals. If None, validation will be executed every epoch.")
     parser.add_argument("--dataset_num_workers", type=int, default=0, help="Number of workers for data loading.")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
-    parser.add_argument("--use_al_vae", default=False, action="store_true", help="Whether use the anti-aliased components for vae.")
-    parser.add_argument("--use_al_dit", default=False, action="store_true", help="Whether use the anti-aliased components for dit.")
-    parser.add_argument("--use_fdl_loss", default=False, action="store_true", help="Whether use fdl loss in trianing.")
-    parser.add_argument("--fdl_loss_weights", type=float, default=0.001, help="Weights for fdl loss if used.")
     return parser
 
 
