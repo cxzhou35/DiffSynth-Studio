@@ -4,6 +4,30 @@ from .tiler import TileWorker
 from .utils import hash_state_dict_keys, init_weights_on_device
 from .sd3_dit import RMSNorm, AdaLayerNorm, TimestepEmbeddings
 
+try:
+    import flash_attn_interface
+    FLASH_ATTN_3_AVAILABLE = True
+except ModuleNotFoundError:
+    FLASH_ATTN_3_AVAILABLE = False
+
+try:
+    import flash_attn
+    FLASH_ATTN_2_AVAILABLE = True
+except ModuleNotFoundError:
+    FLASH_ATTN_2_AVAILABLE = False
+
+try:
+    from sageattention import sageattn
+    SAGE_ATTN_AVAILABLE = True
+except ModuleNotFoundError:
+    SAGE_ATTN_AVAILABLE = False
+
+try:
+    from block_sparse_attn import block_sparse_attn_func
+    BLOCK_SPARSE_ATTN_AVAILABLE = True
+except ModuleNotFoundError:
+    BLOCK_SPARSE_ATTN_AVAILABLE = False
+
 def interact_with_ipadapter(hidden_states, q, ip_k, ip_v, scale=1.0):
     batch_size, num_tokens = hidden_states.shape[0:2]
     ip_hidden_states = torch.nn.functional.scaled_dot_product_attention(q, ip_k, ip_v)
@@ -70,7 +94,7 @@ class FluxJointAttention(torch.nn.Module):
         xk_out = freqs_cis[..., 0] * xk_[..., 0] + freqs_cis[..., 1] * xk_[..., 1]
         return xq_out.reshape(*xq.shape).type_as(xq), xk_out.reshape(*xk.shape).type_as(xk)
 
-    def forward(self, hidden_states_a, hidden_states_b, image_rotary_emb, attn_mask=None, ipadapter_kwargs_list=None):
+    def forward(self, hidden_states_a, hidden_states_b, image_rotary_emb, attn_mask=None, num_samples=1, ipadapter_kwargs_list=None):
         batch_size = hidden_states_a.shape[0]
 
         # Part A
@@ -89,9 +113,21 @@ class FluxJointAttention(torch.nn.Module):
         k = torch.concat([k_b, k_a], dim=2)
         v = torch.concat([v_b, v_a], dim=2)
 
-        q, k = self.apply_rope(q, k, image_rotary_emb)
+        # 3D attention
+        if num_samples > 1:
+            target_pattern = "1 n (b s) d"
+            q = rearrange(q, f"b n s d -> {target_pattern}")
+            k = rearrange(k, f"b n s d -> {target_pattern}")
+            v = rearrange(v, f"b n s d -> {target_pattern}")
+            image_rotary_emb = rearrange(image_rotary_emb, "b n s d c1 c2 -> 1 n (b s) d c1 c2")
 
+        q, k = self.apply_rope(q, k, image_rotary_emb)
         hidden_states = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+
+        # 3D attention
+        if num_samples > 1:
+            hidden_states = rearrange(hidden_states, f"{target_pattern} -> b n s d", b=batch_size)
+
         hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, self.num_heads * self.head_dim)
         hidden_states = hidden_states.to(q.dtype)
         hidden_states_b, hidden_states_a = hidden_states[:, :hidden_states_b.shape[1]], hidden_states[:, hidden_states_b.shape[1]:]
@@ -129,23 +165,23 @@ class FluxJointTransformerBlock(torch.nn.Module):
         )
 
 
-    def forward(self, hidden_states_a, hidden_states_b, temb, image_rotary_emb, attn_mask=None, num_frames=1, ipadapter_kwargs_list=None):
+    def forward(self, hidden_states_a, hidden_states_b, temb, image_rotary_emb, attn_mask=None, num_samples=1, ipadapter_kwargs_list=None):
         norm_hidden_states_a, gate_msa_a, shift_mlp_a, scale_mlp_a, gate_mlp_a = self.norm1_a(hidden_states_a, emb=temb)
         norm_hidden_states_b, gate_msa_b, shift_mlp_b, scale_mlp_b, gate_mlp_b = self.norm1_b(hidden_states_b, emb=temb)
 
         # 3D Attention
-        if num_frames > 1:
-            norm_hidden_states_a = rearrange(norm_hidden_states_a, "(b t) l c -> b (t l) c", t=num_frames).contiguous()
-            norm_hidden_states_b = rearrange(norm_hidden_states_b, "(b t) l c -> b (t l) c", t=num_frames).contiguous()
-            image_rotary_emb = rearrange(image_rotary_emb, "b 1 l ... -> 1 1 (b l) ...").contiguous()
+        # if num_samples > 1:
+        #     norm_hidden_states_a = rearrange(norm_hidden_states_a, "(t b) l c -> b (t l) c", t=num_samples).contiguous()
+        #     norm_hidden_states_b = rearrange(norm_hidden_states_b, "(t b) l c -> b (t l) c", t=num_samples).contiguous()
+        #     image_rotary_emb = rearrange(image_rotary_emb, "b 1 l ... -> 1 1 (b l) ...").contiguous()
 
         # Attention
-        attn_output_a, attn_output_b = self.attn(norm_hidden_states_a, norm_hidden_states_b, image_rotary_emb, attn_mask, ipadapter_kwargs_list)
+        attn_output_a, attn_output_b = self.attn(norm_hidden_states_a, norm_hidden_states_b, image_rotary_emb, attn_mask, num_samples, ipadapter_kwargs_list)
 
         # 3D Attention
-        if num_frames > 1:
-            attn_output_a = rearrange(attn_output_a, "b (t l) c -> (b t) l c", t=num_frames).contiguous()
-            attn_output_b = rearrange(attn_output_b, "b (t l) c -> (b t) l c", t=num_frames).contiguous()
+        # if num_samples > 1:
+        #     attn_output_a = rearrange(attn_output_a, "b (t l) c -> (t b) l c", t=num_samples).contiguous()
+        #     attn_output_b = rearrange(attn_output_b, "b (t l) c -> (t b) l c", t=num_samples).contiguous()
 
         # Part A
         hidden_states_a = hidden_states_a + gate_msa_a * attn_output_a
@@ -237,16 +273,29 @@ class FluxSingleTransformerBlock(torch.nn.Module):
         return xq_out.reshape(*xq.shape).type_as(xq), xk_out.reshape(*xk.shape).type_as(xk)
 
 
-    def process_attention(self, hidden_states, image_rotary_emb, attn_mask=None, ipadapter_kwargs_list=None):
+    def process_attention(self, hidden_states, image_rotary_emb, attn_mask=None, num_samples=None, ipadapter_kwargs_list=None):
         batch_size = hidden_states.shape[0]
 
         qkv = hidden_states.view(batch_size, -1, 3 * self.num_heads, self.head_dim).transpose(1, 2)
         q, k, v = qkv.chunk(3, dim=1)
         q, k = self.norm_q_a(q), self.norm_k_a(k)
 
+        # 3D attention
+        if num_samples > 1:
+            target_pattern = "1 n (b s) d"
+            q = rearrange(q, f"b n s d -> {target_pattern}")
+            k = rearrange(k, f"b n s d -> {target_pattern}")
+            v = rearrange(v, f"b n s d -> {target_pattern}")
+            image_rotary_emb = rearrange(image_rotary_emb, "b n s d c1 c2 -> 1 n (b s) d c1 c2")
+
         q, k = self.apply_rope(q, k, image_rotary_emb)
 
         hidden_states = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+
+        # 3D attention
+        if num_samples > 1:
+            hidden_states = rearrange(hidden_states, f"{target_pattern} -> b n s d", b=batch_size)
+
         hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, self.num_heads * self.head_dim)
         hidden_states = hidden_states.to(q.dtype)
         if ipadapter_kwargs_list is not None:
@@ -254,23 +303,23 @@ class FluxSingleTransformerBlock(torch.nn.Module):
         return hidden_states
 
 
-    def forward(self, hidden_states_a, hidden_states_b, temb, image_rotary_emb, attn_mask=None, num_frames=1, ipadapter_kwargs_list=None):
+    def forward(self, hidden_states_a, hidden_states_b, temb, image_rotary_emb, attn_mask=None, num_samples=1, ipadapter_kwargs_list=None):
         residual = hidden_states_a
         norm_hidden_states, gate = self.norm(hidden_states_a, emb=temb)
         hidden_states_a = self.to_qkv_mlp(norm_hidden_states)
         attn_output, mlp_hidden_states = hidden_states_a[:, :, :self.dim * 3], hidden_states_a[:, :, self.dim * 3:]
 
         # 3D Attention
-        if num_frames > 1:
-            attn_output = rearrange(attn_output, "(b t) l c -> b (t l) c", t=num_frames).contiguous()
-            image_rotary_emb = rearrange(image_rotary_emb, "b 1 l ... -> 1 1 (b l) ...").contiguous()
+        # if num_samples > 1:
+        #     attn_output = rearrange(attn_output, "(b t) l c -> b (t l) c", t=num_samples).contiguous()
+        #     image_rotary_emb = rearrange(image_rotary_emb, "b 1 l ... -> 1 1 (b l) ...").contiguous()
 
-        attn_output = self.process_attention(attn_output, image_rotary_emb, attn_mask, ipadapter_kwargs_list)
+        attn_output = self.process_attention(attn_output, image_rotary_emb, attn_mask, num_samples, ipadapter_kwargs_list)
         mlp_hidden_states = torch.nn.functional.gelu(mlp_hidden_states, approximate="tanh")
 
         # 3D Attention
-        if num_frames > 1:
-            attn_output = rearrange(attn_output, "b (t l) c -> (b t) l c", t=num_frames).contiguous()
+        # if num_samples > 1:
+        #     attn_output = rearrange(attn_output, "b (t l) c -> (b t) l c", t=num_samples).contiguous()
 
         hidden_states_a = torch.cat([attn_output, mlp_hidden_states], dim=2)
         hidden_states_a = gate.unsqueeze(1) * self.proj_out(hidden_states_a)

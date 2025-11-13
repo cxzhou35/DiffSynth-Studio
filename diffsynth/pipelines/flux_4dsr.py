@@ -6,6 +6,7 @@ from PIL import Image
 from tqdm import tqdm
 from einops import rearrange, repeat
 from ..utils import ModelConfig, BasePipeline, PipelineUnit, PipelineUnitRunner
+from ..utils.base_utils import DotDict
 from ..models import (
     FluxDiT,
     ModelManager,
@@ -176,14 +177,21 @@ class Flux4DSRPipeline(BasePipeline):
 
         noise_pred = self.model_fn(**inputs, timestep=timestep)
 
-        loss = torch.nn.functional.mse_loss(noise_pred.float(), training_target.float())
-        loss = loss * self.scheduler.training_weight(timestep)
+        loss_dict = DotDict()
+        loss = 0.
+        mse_loss = torch.nn.functional.mse_loss(noise_pred.float(), training_target.float())
+        mse_loss = mse_loss * self.scheduler.training_weight(timestep)
+        loss += mse_loss
+
+        loss_dict.update({'mse_loss': mse_loss})
 
         # TODO: add FDL loss
         if inputs["use_fdl_loss"]:
             fdl_loss = FDL_loss(num_proj=128, model="VGG")
             loss += fdl_loss(noise_pred.float(), training_target.float()) * inputs["fdl_loss_weights"]
-        return loss
+            loss_dict.update({'fdl_loss': fdl_loss})
+        loss_dict.update({'total_loss': loss})
+        return loss, loss_dict
 
 
     def _enable_vram_management_with_default_config(self, model, vram_limit):
@@ -389,6 +397,7 @@ class Flux4DSRPipeline(BasePipeline):
         # Shape
         height: int = 1024,
         width: int = 1024,
+        num_samples: int = 1,
         # Randomness
         seed: int = None,
         rand_device: str = "cpu",
@@ -431,6 +440,7 @@ class Flux4DSRPipeline(BasePipeline):
             "cfg_scale": cfg_scale, "embedded_guidance": embedded_guidance, "t5_sequence_length": t5_sequence_length,
             "input_image": input_image, "denoising_strength": denoising_strength,
             "height": height, "width": width,
+            "num_samples": num_samples,
             "seed": seed, "rand_device": rand_device,
             "sigma_shift": sigma_shift, "num_inference_steps": num_inference_steps,
             "multidiffusion_prompts": multidiffusion_prompts, "multidiffusion_masks": multidiffusion_masks, "multidiffusion_scales": multidiffusion_scales,
@@ -484,10 +494,11 @@ class FluxImageUnit_ShapeChecker(PipelineUnit):
 
 class FluxImageUnit_NoiseInitializer(PipelineUnit):
     def __init__(self):
-        super().__init__(input_params=("height", "width", "seed", "rand_device"))
+        super().__init__(input_params=("height", "width", "seed", "rand_device", "num_samples"))
 
-    def process(self, pipe: Flux4DSRPipeline, height, width, seed, rand_device):
-        noise = pipe.generate_noise((1, 16, height//8, width//8), seed=seed, rand_device=rand_device)
+    def process(self, pipe: Flux4DSRPipeline, height, width, seed, rand_device, num_samples):
+        # TODO: change the noise batch dim to n_samples
+        noise = pipe.generate_noise((num_samples, 16, height//8, width//8), seed=seed, rand_device=rand_device)
         return {"noise": noise}
 
 
@@ -509,9 +520,8 @@ class FluxImageUnit_InputImageEmbedder(PipelineUnit):
             input_latent = pipe.vae_encoder(image, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
             input_latents.append(input_latent)
 
-        # TODO: concat the input latents in batch dim, from (B, C, H, W) -> (NxB, C, H, W)
+        # TODO: concat the input latents in batch dim, from (1, C, H, W) -> (B, C, H, W)
         input_latents = torch.concat(input_latents, dim=0)
-        noise = repeat(noise, '1 ... -> b ...', b=input_latents.shape[0])
         if pipe.scheduler.training:
             return {"latents": noise, "input_latents": input_latents}
         else:
@@ -575,7 +585,9 @@ class FluxImageUnit_Kontext(PipelineUnit):
         for kontext_image in kontext_images:
             kontext_image = pipe.preprocess_image(kontext_image)
             kontext_latent = pipe.vae_encoder(kontext_image, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
-            image_ids = pipe.dit.prepare_image_ids(kontext_latent, iterp_offset=2)
+            # TODO: [debug]remove iterplation offset for kontext image ids
+            # image_ids = pipe.dit.prepare_image_ids(kontext_latent, iterp_offset=2)
+            image_ids = pipe.dit.prepare_image_ids(kontext_latent)
 
             # image_ids[..., 0] = 1
             # add reference offsets to image_ids
@@ -836,8 +848,8 @@ def model_fn_flux_image(
     else:
         # Joint Blocks
         for block_id, block in enumerate(dit.blocks):
-            num_frames = hidden_states.shape[0] if dit_3d_attn_interval is not None and block_id < len(dit.blocks) // dit_3d_attn_interval else 1
-            # log(f"Double block {block_id} with number of frames: {num_frames}")
+            num_samples = hidden_states.shape[0] if dit_3d_attn_interval is not None and block_id < len(dit.blocks) // dit_3d_attn_interval else 1
+            # log(f"Double block {block_id} with number of samples: {num_samples}")
             hidden_states, prompt_emb = gradient_checkpoint_forward(
                 block,
                 use_gradient_checkpointing,
@@ -847,7 +859,7 @@ def model_fn_flux_image(
                 conditioning,
                 image_rotary_emb,
                 attention_mask,
-                num_frames,
+                num_samples,
                 ipadapter_kwargs_list=ipadapter_kwargs_list.get(block_id, None),
             )
             # ControlNet
@@ -858,11 +870,11 @@ def model_fn_flux_image(
                     hidden_states[:, :-kontext_latents.shape[1]] = hidden_states[:, :-kontext_latents.shape[1]] + controlnet_res_stack[block_id]
 
         # Single Blocks
-        hidden_states = torch.cat([prompt_emb, hidden_states], dim=1)
+        hidden_states = torch.cat([prompt_emb, hidden_states], dim=1) # NOTE: keep batch dim, concat in sequence dim
         num_joint_blocks = len(dit.blocks)
         for block_id, block in enumerate(dit.single_blocks):
-            num_frames = hidden_states.shape[0] if dit_3d_attn_interval is not None and block_id < len(dit.single_blocks) // dit_3d_attn_interval else 1
-            # log(f"Single block {block_id} with number of frames: {num_frames}")
+            num_samples = hidden_states.shape[0] if dit_3d_attn_interval is not None and block_id < len(dit.single_blocks) // dit_3d_attn_interval else 1
+            # log(f"Single block {block_id} with number of frames: {num_samples}")
             hidden_states, prompt_emb = gradient_checkpoint_forward(
                 block,
                 use_gradient_checkpointing,
@@ -872,7 +884,7 @@ def model_fn_flux_image(
                 conditioning,
                 image_rotary_emb,
                 attention_mask,
-                num_frames,
+                num_samples,
                 ipadapter_kwargs_list=ipadapter_kwargs_list.get(block_id + num_joint_blocks, None),
             )
             # ControlNet

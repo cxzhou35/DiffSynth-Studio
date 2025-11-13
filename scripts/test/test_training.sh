@@ -45,3 +45,4 @@ accelerate launch --mixed_precision=bf16 scripts/model/train.py \
   --use_gradient_checkpointing \
   --use_gradient_checkpointing_offload \
   --dit_3d_attn_interval 3 \
+  --project_name "debug_training" \

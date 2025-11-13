@@ -1,9 +1,8 @@
-
-from typing import Never
-import imageio, os, torch, warnings, torchvision, argparse, json
+from typing import Any, Never
 import math
 import shutil
 from functools import partial
+import imageio, os, torch, warnings, torchvision, argparse, json
 from ..utils import ModelConfig
 from ..models.utils import load_state_dict
 from peft import LoraConfig, inject_adapter_in_model
@@ -12,9 +11,22 @@ import pandas as pd
 from tqdm import tqdm
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration
-# from ..tools.vis_util import caption_batch
-# from ..tools.rand_util import init_global_seed, worker_init_fn_base, get_rand_seed
+from ..utils.base_utils import DotDict
 
+
+def _sanitize_tracker_config(config: dict | None) -> dict[str, Any] | None:
+    if config is None:
+        return None
+    allowed_types = (int, float, str, bool, torch.Tensor)
+    sanitized: dict[str, Any] = {}
+    for key, value in config.items():
+        if isinstance(value, allowed_types):
+            sanitized[key] = value
+        elif value is None:
+            continue
+        else:
+            sanitized[key] = str(value)
+    return sanitized
 
 
 class ImageDataset(torch.utils.data.Dataset):
@@ -499,13 +511,23 @@ class ModelLogger:
         epoch_idx = 0 if self.num_steps < self.steps_per_epoch else self.num_steps//self.steps_per_epoch-1
         if save_steps is not None and self.num_steps % save_steps == 0:
             self.save_model(accelerator, model, f"epoch-{epoch_idx}-step-{self.num_steps}.safetensors")
-        if val_steps is not None and self.num_steps % val_steps == 0:
-            self.validate_model(accelerator, model, f"epoch-{epoch_idx}-step-{self.num_steps}")
+        # if val_steps is not None and self.num_steps % val_steps == 0:
+        #     self.validate_model(accelerator, model, f"epoch-{epoch_idx}-step-{self.num_steps}")
+
+
+    def record(self, accelerator, loss_dict, data):
+        logs = DotDict()
+        for key, value in loss_dict.items():
+            avg_value = accelerator.gather_for_metrics(value.repeat(1)).mean()
+            logs[f"train/{key}"] = avg_value.item()
+        # gt_images = [data["image"] for data in datas]
+        # cond_images = [data["kontext_images"] for data in datas]
+        accelerator.log(logs, step=self.num_steps)
 
 
     def on_epoch_end(self, accelerator, model, epoch_id):
         self.save_model(accelerator, model, f"epoch-{epoch_id}-step-{self.num_steps}.safetensors")
-        self.validate_model(accelerator, model, f"epoch-{epoch_id}-step-{self.num_steps}")
+        # self.validate_model(accelerator, model, f"epoch-{epoch_id}-step-{self.num_steps}")
 
 
     def on_training_end(self, accelerator, model, save_steps=None):
@@ -519,43 +541,18 @@ class ModelLogger:
             state_dict = accelerator.get_state_dict(model)
             state_dict = accelerator.unwrap_model(model).export_trainable_state_dict(state_dict, remove_prefix=self.remove_prefix_in_ckpt)
             state_dict = self.state_dict_converter(state_dict)
-            save_dir = os.path.join(self.output_path, "models")
-            os.makedirs(save_dir, exist_ok=True)
-            path = os.path.join(save_dir, file_name)
+            os.makedirs(self.output_path, exist_ok=True)
+            path = os.path.join(self.output_path, file_name)
             accelerator.save(state_dict, path, safe_serialization=True)
 
 
-    def validate_model(self, accelerator, model, eval_dir):
-        # TODO: add validation codes
-        accelerator.wait_for_everyone()
-        unwrapped_model = accelerator.unwrap_model(model)
-        proc_index = accelerator.process_index
-        num_proc = accelerator.num_processes
-        with torch.no_grad():
-            eval_save_dir = os.path.join(self.output_path, "evals", eval_dir, exist_ok=True)
-            os.makedirs(eval_save_dir)
-            for data_id, datas in enumerate(dataset_loader):
-                result_images = unwrapped_model.pipe(
-                    input_image=[data["image"] for data in datas],
-                    height=datas[0]["image"].size[1],
-                    width=data[0]["image"].size[0],
-                    kontext_images=[data["kontext_images"] for data in datas],
-                )
-                for idx, data in enumerate(datas):
-                    save_image = [data["kontext_images"], result_images[idx, ...], data["image"]]
-                    total_width = data["image"].size[0] * 3
-                    height = data["image"].size[1]
-                    new_image = Image.new('RGB', (total_width, height))
-                    x_offset = 0
-                    for image in save_image:
-                        new_img.paste(im, (x_offset, 0))
-                        x_offset += im.width
-                    result_path = os.path.join(eval_save_dir, f"{(data_id * num_proc + proc_index):03d}.png")
-                    new_img.save(result_path)
+    def validate_model(self, accelerator, model, dir_name):
+        # TODO: add avalidation codes
+        pass
 
 
 def launch_training_task(
-    dataset: torch.utils.data.Dataset,
+    datasets: dict[str, torch.utils.data.Dataset],
     model: DiffusionTrainingModule,
     model_logger: ModelLogger,
     learning_rate: float = 1e-5,
@@ -571,8 +568,8 @@ def launch_training_task(
     mixed_precision: str = None,
     report_to: str = None,
     tracker_config: dict = None,
-    load_from_latest: bool = False,
-    val_dataset_dict: dict = None,
+    resume_from_ckpt: bool = False,
+    project_name: str = None,
     args = None,
 ):
     if args is not None:
@@ -580,16 +577,25 @@ def launch_training_task(
         weight_decay = args.weight_decay
         num_workers = args.dataset_num_workers
         save_steps = args.save_steps
-        val_steps = args.validate_steps
+        val_steps = args.val_steps
         num_epochs = args.num_epochs
         gradient_accumulation_steps = args.gradient_accumulation_steps
         find_unused_parameters = args.find_unused_parameters
         output_dir = args.output_path
-        load_from_latest = args.resume_from_checkpoint
+        resume_from_ckpt = args.resume_from_ckpt
+        project_name = args.project_name
         tracker_config = dict(vars(args))
+
+    tracker_config = _sanitize_tracker_config(tracker_config)
 
     optimizer = torch.optim.AdamW(model.trainable_modules(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer)
+
+    train_dataloader = torch.utils.data.DataLoader(datasets['train'], shuffle=True, collate_fn=lambda x: x[0], num_workers=num_workers)
+    if 'val' in datasets:
+        val_dataloader = torch.utils.data.DataLoader(datasets['val'], shuffle=False, collate_fn=lambda x: x[0], num_workers=num_workers)
+    else:
+        val_dataloader = None
 
     accelerator_project_config = ProjectConfiguration(project_dir=output_dir, logging_dir=logging_dir)
     accelerator = Accelerator(
@@ -599,109 +605,30 @@ def launch_training_task(
         project_config=accelerator_project_config,
         kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=find_unused_parameters)],
     )
-
-    rank_id = accelerator.process_index
-    init_global_seed(rank=rank_id)
-    worker_init_fn = partial(worker_init_fn_base, rank_id=rank_id)
-    dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, generator=torch.Generator().manual_seed(get_rand_seed(rank_id)), collate_fn=lambda x: x[0], num_workers=num_workers, worker_init_fn=worker_init_fn)
-    val_dataloader_dict = {}
-    if val_dataset_dict is not None:
-        for split, ds in val_dataset_dict.items():
-            val_dataloader_dict[split] = torch.utils.data.DataLoader(
-                ds,
-                shuffle=True,
-                generator=torch.Generator().manual_seed(get_rand_seed(rank_id)),
-                collate_fn=lambda x: x[0],
-                num_workers=1,
-                worker_init_fn=worker_init_fn,
-            )
-
-    val_keys = tuple(val_dataloader_dict.keys())
-    model, optimizer, dataloader, scheduler, *rest = accelerator.prepare(model, optimizer, dataloader, scheduler, *val_dataloader_dict.values())
-    val_dataloader_dict = dict(zip(val_keys, rest))
-    if len(val_dataloader_dict) > 0:
-        model_logger.val_dataset = val_dataloader_dict
+    model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, train_dataloader, scheduler)
     if accelerator.is_main_process:
-        accelerator.init_trackers("train_ver0", tracker_config) #TODO: "train_ver0" can be edited
+        accelerator.init_trackers(project_name, tracker_config)
 
-    first_epoch = 0
-    if load_from_latest and os.path.exists(os.path.join(output_dir, "checkpoint")):
-        dirs = os.listdir(os.path.join(output_dir, "checkpoint"))
-        epoch_dirs = [d for d in dirs if "epoch" in d]
-        dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
-        epoch_dirs = sorted(epoch_dirs, key=lambda x: int(x.split("-")[-1]))
-        while len(dirs) > 0:
-            path = dirs.pop()
-            accelerator.print(f"Resuming from checkpoint {path}")
-            try:
-                accelerator.load_state(os.path.join(output_dir, "checkpoint", path))
-                global_step = int(path.split("-")[1])
-                model_logger.num_steps = global_step
-                first_epoch = int(epoch_dirs[-1].split("-")[-1]) + 1 if len(epoch_dirs) > 0 else first_epoch
-                break
-            except Exception as e:
-                accelerator.print(f"Failed to load checkpoint {path}, with exception {e}")
-                if accelerator.is_main_process:
-                    shutil.rmtree(os.path.join(output_dir, "checkpoint", path))
+    model_logger.steps_per_epoch = math.ceil(len(dataloader) / gradient_accumulation_steps)
 
-    dataset_size = len(dataloader)
-    per_device_batch_size = 1  #TODO: can be edited
-    effective_batch = per_device_batch_size * gradient_accumulation_steps
-    model_logger.steps_per_epoch = math.ceil(dataset_size / effective_batch)
-    accelerator.print(f"dataset length: {len(dataset)}")
-    accelerator.print(f"dataloader length: {len(dataloader)}")
-    accelerator.print(f"steps per epoch: {model_logger.steps_per_epoch}")
-
-    for epoch_id in range(first_epoch, num_epochs):
-        tq_dataloader = tqdm(dataloader, desc="Steps", disable=not accelerator.is_local_main_process)
-        for data in tq_dataloader:
-            train_loss = 0.0
+    for epoch_id in range(num_epochs):
+        progress_bar = tqdm(dataloader, total=len(dataloader), disable=not accelerator.is_local_main_process, desc=f"Training epoch {epoch_id}")
+        for data in progress_bar:
             with accelerator.accumulate(model):
                 optimizer.zero_grad()
-                if dataset.load_from_cache:
-                    loss = model({}, inputs=data)
-                else:
-                    loss = model(data)
+                loss, loss_dict = model(data)
                 accelerator.backward(loss)
                 optimizer.step()
-                scheduler.step()
-                # Gather the losses across all processes for logging (if we use distributed training).
-                avg_loss = accelerator.gather(loss.repeat(1)).mean()
-                train_loss += avg_loss.item() / gradient_accumulation_steps
-            if accelerator.sync_gradients:
                 model_logger.on_step_end(accelerator, model, save_steps, val_steps)
-                accelerator.log({"train_loss": train_loss}, step=model_logger.num_steps)
-                logs = {"step_loss": train_loss, "epoch": epoch_id}
-                tq_dataloader.set_postfix(**logs)
-        # if save_steps is None:
+                model_logger.record(accelerator, loss_dict, data)
+                logs = {"loss": loss.item(), "step": model_logger.num_steps}
+                progress_bar.set_postfix(**logs)
+                scheduler.step()
         model_logger.on_epoch_end(accelerator, model, epoch_id)
-    model_logger.on_training_end(accelerator, model, save_steps, val_steps)
+    model_logger.on_training_end(accelerator, model, save_steps)
 
     accelerator.wait_for_everyone()
     accelerator.end_training()
-
-def launch_data_process_task(
-    dataset: torch.utils.data.Dataset,
-    model: DiffusionTrainingModule,
-    model_logger: ModelLogger,
-    num_workers: int = 8,
-    args = None,
-):
-    if args is not None:
-        num_workers = args.dataset_num_workers
-
-    dataloader = torch.utils.data.DataLoader(dataset, shuffle=False, collate_fn=lambda x: x[0], num_workers=num_workers)
-    accelerator = Accelerator()
-    model, dataloader = accelerator.prepare(model, dataloader)
-
-    for data_id, data in tqdm(enumerate(dataloader)):
-        with accelerator.accumulate(model):
-            with torch.no_grad():
-                folder = os.path.join(model_logger.output_path, str(accelerator.process_index))
-                os.makedirs(folder, exist_ok=True)
-                save_path = os.path.join(model_logger.output_path, str(accelerator.process_index), f"{data_id}.pth")
-                data = model(data, return_inputs=True)
-                torch.save(data, save_path)
 
 
 
@@ -764,8 +691,8 @@ def flux_parser():
     parser.add_argument("--lora_base_model", type=str, default=None, help="Which model LoRA is added to.")
     parser.add_argument("--lora_target_modules", type=str, default="q,k,v,o,ffn.0,ffn.2", help="Which layers LoRA is added to.")
     parser.add_argument("--lora_rank", type=int, default=32, help="Rank of LoRA.")
-    parser.add_argument("--resume_from_checkpoint", default=False, action="store_true", help="Whether to use pretrained checkpoint.")
     parser.add_argument("--lora_checkpoint", type=str, default=None, help="Path to the LoRA checkpoint. If provided, LoRA will be loaded from this checkpoint.")
+    parser.add_argument("--resume_from_ckpt", default=False, action="store_true", help="Whether to use pretrained checkpoint.")
     parser.add_argument("--extra_inputs", default=None, help="Additional model inputs, comma-separated.")
     parser.add_argument("--kontext_ref_offsets", nargs=3, type=int, default=[1, 0, 0], help="Reference frame offsets for kontext module.")
     parser.add_argument("--align_to_opensource_format", default=False, action="store_true", help="Whether to align the lora format to opensource format. Only for DiT's LoRA.")
@@ -774,13 +701,14 @@ def flux_parser():
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Gradient accumulation steps.")
     parser.add_argument("--find_unused_parameters", default=False, action="store_true", help="Whether to find unused parameters in DDP.")
     parser.add_argument("--save_steps", type=int, default=None, help="Number of checkpoint saving invervals. If None, checkpoints will be saved every epoch.")
-    parser.add_argument("--validate_steps", type=int, default=None, help="Number of validation invervals. If None, validation will be executed every epoch.")
+    parser.add_argument("--val_steps", type=int, default=None, help="Number of model validate invervals.")
     parser.add_argument("--dataset_num_workers", type=int, default=0, help="Number of workers for data loading.")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
     parser.add_argument("--use_al_vae", default=False, action="store_true", help="Whether use the anti-aliased components for vae.")
     parser.add_argument("--use_al_dit", default=False, action="store_true", help="Whether use the anti-aliased components for dit.")
     parser.add_argument("--use_fdl_loss", default=False, action="store_true", help="Whether use fdl loss in trianing.")
     parser.add_argument("--fdl_loss_weights", type=float, default=0.001, help="Weights for fdl loss if used.")
+    parser.add_argument("--project_name", type=str, default="test", help="Project name for logging.")
     return parser
 
 

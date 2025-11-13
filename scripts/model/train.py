@@ -73,6 +73,7 @@ class FluxTrainingModule(DiffusionTrainingModule):
             "input_image": [data["image"] for data in datas],
             "height": datas[0]["image"].size[1],
             "width": datas[0]["image"].size[0],
+            "num_samples": len(datas),
             "kontext_ref_offsets": self.kontext_ref_offsets,
             # loss
             "use_fdl_loss": self.use_fdl_loss,
@@ -109,8 +110,8 @@ class FluxTrainingModule(DiffusionTrainingModule):
     def forward(self, data, inputs=None):
         if inputs is None: inputs = self.forward_preprocess(data)
         models = {name: getattr(self.pipe, name) for name in self.pipe.in_iteration_models}
-        loss = self.pipe.training_loss(**models, **inputs)
-        return loss
+        loss, loss_dict = self.pipe.training_loss(**models, **inputs)
+        return loss, loss_dict
 
 
 def main():
@@ -119,7 +120,7 @@ def main():
     args = parser.parse_args()
 
     # create dataset from metadata
-    datasets = Dotdict()
+    datasets = DotDict()
     for split in ['train', 'val']:
         metadata_path = args.dataset_metadata_path.replace("train", split)
         dataset = MultiVideoDataset(
@@ -172,14 +173,22 @@ def main():
     )
 
     # set logger
+    logging_dir = os.path.join("logs", os.path.basename(args.output_path))
     model_logger = ModelLogger(
         args.output_path,
         remove_prefix_in_ckpt=args.remove_prefix_in_ckpt,
         state_dict_converter=FluxLoRAConverter.align_to_opensource_format if args.align_to_opensource_format else lambda x:x,
-        val_dataset=datasets['val'],
     )
 
-    launch_training_task(datasets['train'], model, model_logger, args=args)
+    launch_training_task(
+        datasets,
+        model,
+        model_logger,
+        logging_dir=logging_dir,
+        mixed_precision="bf16",
+        report_to="tensorboard",
+        args=args
+    )
 
 def set_env():
     os.environ["TOKENIZERS_PARALLELISM"] = "false"

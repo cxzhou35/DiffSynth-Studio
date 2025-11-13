@@ -4,7 +4,7 @@
 SCENE_ID="old_tim_1440p_120f"
 TIMESTAMP=$(date +"%Y%m%d%H%M%S")
 DATASET_BASE_PATH="data/${SCENE_ID}"
-DATASET_METADATA_PATH="${DATASET_BASE_PATH}/kontext_data/metadata.csv"
+DATASET_METADATA_PATH="${DATASET_BASE_PATH}/kontext_data/metadata_train.csv"
 IMG_HEIGHT=1440
 IMG_WIDTH=2560
 

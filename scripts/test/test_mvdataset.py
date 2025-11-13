@@ -43,11 +43,11 @@ def main():
         )
     )
 
-    # data = dataset.__getitem__(120)
-    # breakpoint()
-    dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=8)
-    for data in tqdm(dataloader):
-        breakpoint()
+    data = dataset.__getitem__(120)
+    breakpoint()
+    # dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=8)
+    # for data in tqdm(dataloader):
+    #     breakpoint()
 
 
 if __name__ == '__main__':

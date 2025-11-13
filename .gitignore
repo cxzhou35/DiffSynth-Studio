@@ -1,9 +1,9 @@
 # dirs
 data/*
 outputs/*
-./logs/*
+logs/*
 models/*
-./evals/*
+evals/*
 .vscode/*
 
 __pycache__
