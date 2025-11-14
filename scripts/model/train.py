@@ -24,6 +24,8 @@ class FluxTrainingModule(DiffusionTrainingModule):
         kontext_ref_offsets=None,
         use_fdl_loss=False,
         fdl_loss_weights=None,
+        use_freq_loss=False,
+        freq_loss_weights=None,
         temporal_window_size=1,
         spatial_window_size=1,
         dit_3d_attn_interval=None,
@@ -53,6 +55,8 @@ class FluxTrainingModule(DiffusionTrainingModule):
         self.kontext_ref_offsets = kontext_ref_offsets if kontext_ref_offsets is not None else [1, 0, 0]
         self.use_fdl_loss = use_fdl_loss
         self.fdl_loss_weights = fdl_loss_weights if use_fdl_loss else None
+        self.use_freq_loss = use_freq_loss
+        self.freq_loss_weights = freq_loss_weights if use_freq_loss else None
         self.temporal_window_size= temporal_window_size
         self.spatial_window_size = spatial_window_size
         self.dit_3d_attn_interval = dit_3d_attn_interval
@@ -78,6 +82,8 @@ class FluxTrainingModule(DiffusionTrainingModule):
             # loss
             "use_fdl_loss": self.use_fdl_loss,
             "fdl_loss_weights": self.fdl_loss_weights,
+            "use_freq_loss": self.use_freq_loss,
+            "freq_loss_weights": self.freq_loss_weights,
             # Please do not modify the following parameters
             # unless you clearly know what this will cause.
             "cfg_scale": 1,
@@ -167,6 +173,8 @@ def main():
         kontext_ref_offsets=args.kontext_ref_offsets,
         use_fdl_loss=args.use_fdl_loss,
         fdl_loss_weights=args.fdl_loss_weights,
+        use_freq_loss=args.use_freq_loss,
+        freq_loss_weights=args.freq_loss_weights,
         temporal_window_size=args.temporal_window_size,
         spatial_window_size=args.spatial_window_size,
         dit_3d_attn_interval=args.dit_3d_attn_interval,

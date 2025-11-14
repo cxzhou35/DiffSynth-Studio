@@ -708,6 +708,8 @@ def flux_parser():
     parser.add_argument("--use_al_dit", default=False, action="store_true", help="Whether use the anti-aliased components for dit.")
     parser.add_argument("--use_fdl_loss", default=False, action="store_true", help="Whether use fdl loss in trianing.")
     parser.add_argument("--fdl_loss_weights", type=float, default=0.001, help="Weights for fdl loss if used.")
+    parser.add_argument("--use_freq_loss", default=False, action="store_true", help="Whether use frequency loss in trianing.")
+    parser.add_argument("--freq_loss_weights", type=float, default=0.01, help="Weights for freequency loss if used.")
     parser.add_argument("--project_name", type=str, default="test", help="Project name for logging.")
     return parser
 

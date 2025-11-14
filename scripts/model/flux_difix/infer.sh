@@ -11,7 +11,7 @@ OUTPUT_DIR="outputs/old_tim_1440p_120f/train_lora_ft_with_3d_attn/inference/trai
 
 # for loop for the DIR
 for d in "${DIR[@]}"; do
-    CUDA_VISIBLE_DEVICES=0 python3 scripts/model/FLUX.1-Kontext-dev/infer_kontext.py \
+    CUDA_VISIBLE_DEVICES=0 python3 scripts/model/flux_kontext/infer_kontext.py \
         --cond_image "$COND_IMAGE/$d" \
         --prompt "${PROMPT}" \
         --height $HEIGHT \

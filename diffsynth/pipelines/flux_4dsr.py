@@ -31,6 +31,7 @@ from ..models.flux_ipadapter import FluxIpAdapter
 from ..models.flux_controlnet import FluxControlNet
 
 from easyvolcap.utils.console_utils import log
+from ..utils.loss_utils import Freq_loss
 from FDL_pytorch import FDL_loss
 
 @dataclass
@@ -179,17 +180,27 @@ class Flux4DSRPipeline(BasePipeline):
 
         loss_dict = DotDict()
         loss = 0.
+        t_weights = self.scheduler.training_weight(timestep)
         mse_loss = torch.nn.functional.mse_loss(noise_pred.float(), training_target.float())
-        mse_loss = mse_loss * self.scheduler.training_weight(timestep)
+        mse_loss = mse_loss * t_weights
         loss += mse_loss
 
         loss_dict.update({'mse_loss': mse_loss})
 
-        # TODO: add FDL loss
+        # TODO: add fdl loss
         if inputs["use_fdl_loss"]:
-            fdl_loss = FDL_loss(num_proj=128, model="VGG")
-            loss += fdl_loss(noise_pred.float(), training_target.float()) * inputs["fdl_loss_weights"]
+            FDLL = FDL_loss(num_proj=128, model="VGG")
+            fdl_loss = FDLL(noise_pred.float(), training_target.float()) * inputs["fdl_loss_weights"] * t_weights
+            loss += fdl_loss
             loss_dict.update({'fdl_loss': fdl_loss})
+
+        # TODO: add frequency loss
+        if inputs["use_freq_loss"]:
+            FREQL = Freq_loss(balance=None, time_length=self.scheduler.num_train_timesteps)
+            freq_loss = FREQL(noise_pred.float(), training_target.float(), timestep) * inputs["freq_loss_weights"] * t_weights
+            loss += freq_loss
+            loss_dict.update({'freq_loss': freq_loss})
+
         loss_dict.update({'total_loss': loss})
         return loss, loss_dict
 
