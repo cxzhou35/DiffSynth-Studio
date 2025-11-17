@@ -1,7 +1,7 @@
 #! /bin/bash
 
 export NUM_NODES=1
-export NUM_GPUS=4
+export NUM_GPUS=8
 
 # get time now
 SCENE_ID="old_tim_1440p_120f"
