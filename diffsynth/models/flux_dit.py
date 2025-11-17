@@ -373,7 +373,7 @@ class FluxDiT(torch.nn.Module):
         return hidden_states
 
 
-    def prepare_image_ids(self, latents, iterp_offset=1):
+    def prepare_image_ids(self, latents, iterp_offset=1, use_mv_emb=False):
         batch_size, _, height, width = latents.shape
         latent_image_ids = torch.zeros(height // 2, width // 2, 3) # half of the latent size for patchifying(2x2)
         if iterp_offset > 1:
@@ -385,6 +385,9 @@ class FluxDiT(torch.nn.Module):
 
         latent_image_id_height, latent_image_id_width, latent_image_id_channels = latent_image_ids.shape
 
+        # TODO: add multi sample position encoding for 3d attention
+        # if use_mv_emb:
+        #     latent_image_ids = latent_image_ids[None, :] + torch.arange(1, batch_size+1, 1)
         latent_image_ids = latent_image_ids[None, :].repeat(batch_size, 1, 1, 1) # (B, H/2, W/2, C)
         latent_image_ids = latent_image_ids.reshape(
             batch_size, latent_image_id_height * latent_image_id_width, latent_image_id_channels

@@ -1,5 +1,4 @@
 import os
-import csv
 import argparse
 from tqdm import tqdm
 from easyvolcap.utils.console_utils import log, tqdm
@@ -16,7 +15,7 @@ def check_dir_format(image_dir: str) -> str:
         raise ValueError(f"Invalid image directory format: {image_dir}")
 
 
-def construct_cond_data(image_dir: str, cond_image_dir: str, prompt: str, metafile_path: str, cond_type: str, remove_prefix: str):
+def construct_cond_data(image_dir: str, cond_image_dir: str, prompt: str, metafile_path: str, cond_type: str, remove_prefix: str, frame_range: list[int]):
     # check input and cond image directory format
     image_dir_format = check_dir_format(image_dir)
     cond_image_dir_format = check_dir_format(cond_image_dir)
@@ -25,6 +24,8 @@ def construct_cond_data(image_dir: str, cond_image_dir: str, prompt: str, metafi
     metafile_handler = FileHandler(metafile_path)
     metafile_type = metafile_handler.file_type
     total_pair_num = 0
+
+    s, e, t = frame_range
 
     # construct condition data and write to metadata file
     # NOTE: data format: evc image_dir/view_dir/image
@@ -36,8 +37,8 @@ def construct_cond_data(image_dir: str, cond_image_dir: str, prompt: str, metafi
         for view_dir in tqdm(view_dirs, desc=f"Constructing condition {cond_type} data"):
             image_view_dir = os.path.join(image_dir, view_dir)
             cond_image_view_dir = os.path.join(cond_image_dir, view_dir)
-            image_list = sorted(os.listdir(image_view_dir))
-            cond_image_list = sorted(os.listdir(cond_image_view_dir))
+            image_list = sorted(os.listdir(image_view_dir))[s:e:t]
+            cond_image_list = sorted(os.listdir(cond_image_view_dir))[s:e:t]
             for idx in range(len(image_list)):
                 image_path = os.path.join(image_view_dir, image_list[idx])
                 cond_image_path = os.path.join(cond_image_view_dir, cond_image_list[idx])
@@ -88,6 +89,7 @@ def parse_args():
     parser.add_argument("-ct", "--cond_type", type=str, default="controlnet", help="Condition type (etc. controlnet, kontext)")
     parser.add_argument("-s", "--split", type=str, default="train", help="Dataset split (train, test, eval)")
     parser.add_argument("-rp", "--remove_prefix", type=str, default="data/old_tim_1440p_120f/", help="Remove prefix in path")
+    parser.add_argument("-fr", "--frame_range", nargs=3, type=int, help="Frame ranges for data selecting")
 
     parse_args = parser.parse_args()
     return parse_args
@@ -103,10 +105,11 @@ def main():
     cond_type = args.cond_type
     split = args.split
     remove_prefix = args.remove_prefix
+    frame_range = args.frame_range
 
     os.makedirs(output_dir, exist_ok=True)
     metafile_path = os.path.join(output_dir, f"metadata_{split}.{meta_type}")
-    total_pair_num = construct_cond_data(image_dir, cond_image_dir, prompt, metafile_path, cond_type, remove_prefix)
+    total_pair_num = construct_cond_data(image_dir, cond_image_dir, prompt, metafile_path, cond_type, remove_prefix, frame_range)
     log(f"Constructed {total_pair_num} {cond_type} condition data pairs.")
     log(f"Saved metadata to {metafile_path}")
 
