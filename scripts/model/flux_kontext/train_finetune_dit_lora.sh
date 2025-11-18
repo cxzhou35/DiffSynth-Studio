@@ -8,7 +8,7 @@ SCENE_ID="old_tim_1440p_120f"
 TIMESTAMP=$(date +"%Y%m%d%H%M%S")
 DATASET_BASE_PATH="data/${SCENE_ID}"
 DATASET_METADATA_PATH="${DATASET_BASE_PATH}/kontext_data/metadata_train.json"
-OUTPUT_PATH="outputs/${SCENE_ID}_${TIMESTAMP}/FLUX.1-Kontext-dev-lora"
+OUTPUT_PATH="outputs/${SCENE_ID}_${TIMESTAMP}/FLUX.1-Kontext-dev-lora-wo_3d_attn"
 # MAX_PIXELS=3686400 # 2560x1440
 MAX_PIXELS=921600 # 1280x720 for kontext images
 IMG_HEIGHT=1440
@@ -36,3 +36,4 @@ accelerate launch --mixed_precision=bf16 --multi_gpu --main_process_port 29501 -
   --align_to_opensource_format \
   --extra_inputs "kontext_images" \
   --use_gradient_checkpointing \
+  --use_gradient_checkpointing_offload \

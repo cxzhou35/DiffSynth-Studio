@@ -62,7 +62,8 @@ def main(args):
 
     for image_path in tqdm(cond_image_paths, desc="Inferring with Flux.1-dev-Kontext-LoRA-Finetune", total=len(cond_image_paths)):
         cond_image = Image.open(image_path)
-        cond_image = cond_image.resize((width, height))
+        # TODO: maybe bug here?
+        # cond_image = cond_image.resize((width, height))
         # inference
         result_image = pipe(
             prompt=prompt,

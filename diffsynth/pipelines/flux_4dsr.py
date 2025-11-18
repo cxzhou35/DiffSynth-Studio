@@ -583,22 +583,30 @@ class FluxImageUnit_EmbeddedGuidanceEmbedder(PipelineUnit):
 
 class FluxImageUnit_Kontext(PipelineUnit):
     def __init__(self):
-        super().__init__(input_params=("kontext_images", "tiled", "tile_size", "tile_stride", "kontext_ref_offsets"))
+        super().__init__(input_params=("kontext_images", "tiled", "tile_size", "tile_stride", "kontext_ref_offsets", "height", "width"))
 
-    def process(self, pipe: Flux4DSRPipeline, kontext_images, tiled, tile_size, tile_stride, kontext_ref_offsets):
+    def process(self, pipe: Flux4DSRPipeline, kontext_images, tiled, tile_size, tile_stride, kontext_ref_offsets, height, width):
         if kontext_images is None:
             return {}
         if not isinstance(kontext_images, list):
             kontext_images = [kontext_images]
+
+        kontext_image_size = kontext_images[0].size
+        uw = width // kontext_image_size[0]
+        uh = height // kontext_image_size[1]
 
         kontext_latents = []
         kontext_image_ids = []
         for kontext_image in kontext_images:
             kontext_image = pipe.preprocess_image(kontext_image)
             kontext_latent = pipe.vae_encoder(kontext_image, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+            # image_ids = pipe.dit.prepare_image_ids(kontext_latent)
+
             # TODO: [debug]remove iterplation offset for kontext image ids
             # image_ids = pipe.dit.prepare_image_ids(kontext_latent, iterp_offset=2)
-            image_ids = pipe.dit.prepare_image_ids(kontext_latent)
+            bs, c, h, w = kontext_latent.shape
+            origin_shape = [bs, c, h * uh, w * uw]
+            image_ids = pipe.dit.prepare_image_ids_new(kontext_latent, origin_shape=origin_shape)
 
             # image_ids[..., 0] = 1
             # add reference offsets to image_ids

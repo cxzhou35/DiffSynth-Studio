@@ -4,11 +4,11 @@ export NUM_NODES=1
 export NUM_GPUS=8
 
 # get time now
-SCENE_ID="old_tim_1440p_300f"
+SCENE_ID="old_tim_1440p_120f"
 TIMESTAMP=$(date +"%Y%m%d%H%M%S")
 DATASET_BASE_PATH="data/${SCENE_ID}"
 DATASET_METADATA_PATH="${DATASET_BASE_PATH}/kontext_data/metadata_train.json"
-OUTPUT_PATH="outputs/${SCENE_ID}_${TIMESTAMP}/FLUX.1-Kontext-dev-lora-3d_attn_window_size_3"
+OUTPUT_PATH="outputs/${SCENE_ID}_${TIMESTAMP}/FLUX.1-Kontext-dev-lora-3d_attn_window_size_3_kontext_image_token_align"
 # MAX_PIXELS=3686400 # 2560x1440
 MAX_PIXELS=921600 # 1280x720 for kontext images
 IMG_HEIGHT=1440
@@ -40,3 +40,4 @@ accelerate launch --mixed_precision=bf16 --multi_gpu --main_process_port 29501 -
   --use_gradient_checkpointing \
   --use_gradient_checkpointing_offload \
   --dit_3d_attn_interval 3 \
+  --project_name "training" \

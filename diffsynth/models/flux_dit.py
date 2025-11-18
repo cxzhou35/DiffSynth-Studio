@@ -396,6 +396,31 @@ class FluxDiT(torch.nn.Module):
 
         return latent_image_ids
 
+    def prepare_image_ids_new(self, latents, origin_shape=None):
+        if origin_shape is not None:
+            _, _, height, width = origin_shape
+            batch_size, _, new_H, new_W = latents.shape
+        else:
+            batch_size, _, height, width = latents.shape
+        latent_image_ids = torch.zeros(height // 2, width // 2, 3)
+        latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(height // 2)[:, None]
+        latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(width // 2)[None, :]
+
+        latent_image_id_height, latent_image_id_width, latent_image_id_channels = latent_image_ids.shape
+
+        latent_image_ids = latent_image_ids[None, :].repeat(batch_size, 1, 1, 1)
+        if origin_shape is not None:
+            latent_image_ids = rearrange(latent_image_ids, "b h w c -> b c h w")
+            latent_image_ids = torch.nn.functional.interpolate(latent_image_ids, size=(new_H // 2, new_W // 2), mode='bilinear', align_corners=False)
+            latent_image_ids = rearrange(latent_image_ids, "b c h w -> b h w c")
+            _, latent_image_id_height, latent_image_id_width, latent_image_id_channels = latent_image_ids.shape
+        latent_image_ids = latent_image_ids.reshape(
+            batch_size, latent_image_id_height * latent_image_id_width, latent_image_id_channels
+        )
+        latent_image_ids = latent_image_ids.to(device=latents.device, dtype=latents.dtype)
+
+        return latent_image_ids
+
 
     def tiled_forward(
         self,
