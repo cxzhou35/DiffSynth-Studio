@@ -38,7 +38,7 @@ class ControlNetInput:
     scale: float = 1.0
     start: float = 1.0
     end: float = 0.0
-    image: Image.Image = None
+    images: Image.Image = None
     inpaint_mask: Image.Image = None
     processor_id: str = None
 
@@ -690,7 +690,7 @@ class FluxImageUnit_ControlNet(PipelineUnit):
         pipe.load_models_to_device(['vae_encoder'])
         conditionings = []
         for controlnet_input in controlnet_inputs:
-            image = controlnet_input.image
+            image = controlnet_input.images
             if controlnet_input.inpaint_mask is not None:
                 image = self.apply_controlnet_mask_on_image(pipe, image, controlnet_input.inpaint_mask)
 

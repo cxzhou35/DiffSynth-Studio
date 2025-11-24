@@ -65,7 +65,7 @@ def main(args):
         result_image = pipe(
             prompt=prompt,
             controlnet_inputs=[ControlNetInput(
-                image=cond_image,
+                images=cond_image,
                 scale=0.9
             )],
             height=height, width=width,

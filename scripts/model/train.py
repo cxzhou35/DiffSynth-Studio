@@ -102,7 +102,9 @@ class FluxTrainingModule(DiffusionTrainingModule):
         controlnet_input = {}
         for extra_input in self.extra_inputs:
             if extra_input.startswith("controlnet_"):
-                controlnet_input[extra_input.replace("controlnet_", "")] = [data[extra_input] for data in datas]
+                # TODO: controlnet inputs dont support multi sample now
+                # controlnet_input[extra_input.replace("controlnet_", "")] = [data[extra_input] for data in datas]
+                controlnet_input[extra_input.replace("controlnet_", "")] = datas[0][extra_input]
             else:
                 inputs_shared[extra_input] = [data[extra_input] for data in datas]
         if len(controlnet_input) > 0:

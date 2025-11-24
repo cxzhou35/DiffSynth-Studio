@@ -61,13 +61,12 @@ def main(args):
         video_writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
 
     for image_path in tqdm(cond_image_paths, desc="Inferring with Flux.1-dev-Kontext-LoRA-Finetune", total=len(cond_image_paths)):
-        cond_image = Image.open(image_path)
+        cond_image_orig = Image.open(image_path)
         # TODO: maybe bug here?
-        # cond_image = cond_image.resize((width, height))
         # inference
         result_image = pipe(
             prompt=prompt,
-            kontext_images=cond_image,
+            kontext_images=cond_image_orig,
             height=height, width=width,
             embedded_guidance=3.5,
             seed=0,
@@ -76,6 +75,7 @@ def main(args):
         # save results
         # image_save_dir = os.path.join(output_dir, "images")
         # os.makedirs(image_save_dir, exist_ok=True)
+        cond_image = cond_image_orig.resize((width, height))
         save_path = os.path.join(output_dir, os.path.basename(image_path))
         # concat the control image and result image side by side
         concat_image = Image.new('RGB', (width * 2, height))
@@ -83,7 +83,7 @@ def main(args):
         concat_image.paste(result_image, (width, 0))
         concat_image.save(save_path)
         if video_writer is not None:
-            video_writer.write(cv2.cvtColor(np.array(concat_image), cv2.COLOR_RGB2BGR))
+            video_writer.write(np.array(concat_image))
 
     if video_writer is not None:
         video_writer.release()

@@ -53,7 +53,7 @@ class QwenImagePipeline(BasePipeline):
             height_division_factor=16, width_division_factor=16,
         )
         from transformers import Qwen2Tokenizer, Qwen2VLProcessor
-        
+
         self.scheduler = FlowMatchScheduler(sigma_min=0, sigma_max=1, extra_one_step=True, exponential_shift=True, exponential_shift_mu=0.8, shift_terminal=0.02)
         self.text_encoder: QwenImageTextEncoder = None
         self.dit: QwenImageDiT = None
@@ -75,8 +75,8 @@ class QwenImagePipeline(BasePipeline):
             QwenImageUnit_BlockwiseControlNet(),
         ]
         self.model_fn = model_fn_qwen_image
-        
-        
+
+
     def load_lora(
         self,
         module: torch.nn.Module,
@@ -104,17 +104,17 @@ class QwenImagePipeline(BasePipeline):
         else:
             loader = GeneralLoRALoader(torch_dtype=self.torch_dtype, device=self.device)
             loader.load(module, lora, alpha=alpha)
-            
-            
+
+
     def clear_lora(self):
         for name, module in self.named_modules():
-            if isinstance(module, AutoWrappedLinear): 
+            if isinstance(module, AutoWrappedLinear):
                 if hasattr(module, "lora_A_weights"):
                     module.lora_A_weights.clear()
                 if hasattr(module, "lora_B_weights"):
                     module.lora_B_weights.clear()
-                    
-    
+
+
     def enable_lora_magic(self):
         if self.dit is not None:
             if not (hasattr(self.dit, "vram_management_enabled") and self.dit.vram_management_enabled):
@@ -134,23 +134,23 @@ class QwenImagePipeline(BasePipeline):
                     ),
                     vram_limit=None,
                 )
-    
-    
+
+
     def training_loss(self, **inputs):
         timestep_id = torch.randint(0, self.scheduler.num_train_timesteps, (1,))
         timestep = self.scheduler.timesteps[timestep_id].to(dtype=self.torch_dtype, device=self.device)
-        
+
         noise = torch.randn_like(inputs["input_latents"])
         inputs["latents"] = self.scheduler.add_noise(inputs["input_latents"], noise, timestep)
         training_target = self.scheduler.training_target(inputs["input_latents"], noise, timestep)
-        
+
         noise_pred = self.model_fn(**inputs, timestep=timestep)
-        
+
         loss = torch.nn.functional.mse_loss(noise_pred.float(), training_target.float())
         loss = loss * self.scheduler.training_weight(timestep)
         return loss
-    
-    
+
+
     def direct_distill_loss(self, **inputs):
         self.scheduler.set_timesteps(inputs["num_inference_steps"])
         models = {name: getattr(self, name) for name in self.in_iteration_models}
@@ -160,8 +160,8 @@ class QwenImagePipeline(BasePipeline):
             inputs["latents"] = self.step(self.scheduler, progress_id=progress_id, noise_pred=noise_pred, **inputs)
         loss = torch.nn.functional.mse_loss(inputs["latents"].float(), inputs["input_latents"].float())
         return loss
-    
-    
+
+
     def _enable_fp8_lora_training(self, dtype):
         from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLRotaryEmbedding, Qwen2RMSNorm, Qwen2_5_VisionPatchEmbed, Qwen2_5_VisionRotaryEmbedding
         from ..models.qwen_image_dit import RMSNorm
@@ -192,15 +192,15 @@ class QwenImagePipeline(BasePipeline):
             enable_vram_management(self.dit, module_map=module_map, module_config=model_config)
         if self.vae is not None:
             enable_vram_management(self.vae, module_map=module_map, module_config=model_config)
-    
-    
+
+
     def enable_vram_management(self, num_persistent_param_in_dit=None, vram_limit=None, vram_buffer=0.5, auto_offload=True, enable_dit_fp8_computation=False):
         self.vram_management_enabled = True
         if vram_limit is None and auto_offload:
             vram_limit = self.get_vram()
         if vram_limit is not None:
             vram_limit = vram_limit - vram_buffer
-        
+
         if self.text_encoder is not None:
             from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLRotaryEmbedding, Qwen2RMSNorm, Qwen2_5_VisionPatchEmbed, Qwen2_5_VisionRotaryEmbedding
             dtype = next(iter(self.text_encoder.parameters())).dtype
@@ -314,8 +314,8 @@ class QwenImagePipeline(BasePipeline):
                 ),
                 vram_limit=vram_limit,
             )
-    
-    
+
+
     @staticmethod
     def from_pretrained(
         torch_dtype: torch.dtype = torch.bfloat16,
@@ -333,7 +333,7 @@ class QwenImagePipeline(BasePipeline):
                 device=model_config.offload_device or device,
                 torch_dtype=model_config.offload_dtype or torch_dtype
             )
-        
+
         # Initialize pipeline
         pipe = QwenImagePipeline(device=device, torch_dtype=torch_dtype)
         pipe.text_encoder = model_manager.fetch_model("qwen_image_text_encoder")
@@ -349,8 +349,8 @@ class QwenImagePipeline(BasePipeline):
             from transformers import Qwen2VLProcessor
             pipe.processor = Qwen2VLProcessor.from_pretrained(processor_config.path)
         return pipe
-    
-    
+
+
     @torch.no_grad()
     def __call__(
         self,
@@ -397,7 +397,7 @@ class QwenImagePipeline(BasePipeline):
     ):
         # Scheduler
         self.scheduler.set_timesteps(num_inference_steps, denoising_strength=denoising_strength, dynamic_shift_len=(height // 16) * (width // 16), exponential_shift_mu=exponential_shift_mu)
-        
+
         # Parameters
         inputs_posi = {
             "prompt": prompt,
@@ -416,7 +416,7 @@ class QwenImagePipeline(BasePipeline):
             "blockwise_controlnet_inputs": blockwise_controlnet_inputs,
             "tiled": tiled, "tile_size": tile_size, "tile_stride": tile_stride,
             "eligen_entity_prompts": eligen_entity_prompts, "eligen_entity_masks": eligen_entity_masks, "eligen_enable_on_negative": eligen_enable_on_negative,
-            "edit_image": edit_image, "edit_image_auto_resize": edit_image_auto_resize, "edit_rope_interpolation": edit_rope_interpolation, 
+            "edit_image": edit_image, "edit_image_auto_resize": edit_image_auto_resize, "edit_rope_interpolation": edit_rope_interpolation,
             "context_image": context_image,
         }
         for unit in self.units:
@@ -438,7 +438,7 @@ class QwenImagePipeline(BasePipeline):
 
             # Scheduler
             inputs_shared["latents"] = self.step(self.scheduler, progress_id=progress_id, noise_pred=noise_pred, **inputs_shared)
-        
+
         # Decode
         self.load_models_to_device(['vae'])
         image = self.vae.decode(inputs_shared["latents"], device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
@@ -517,14 +517,14 @@ class QwenImageUnit_PromptEmbedder(PipelineUnit):
             input_params=("edit_image",),
             onload_model_names=("text_encoder",)
         )
-        
+
     def extract_masked_hidden(self, hidden_states: torch.Tensor, mask: torch.Tensor):
         bool_mask = mask.bool()
         valid_lengths = bool_mask.sum(dim=1)
         selected = hidden_states[bool_mask]
         split_result = torch.split(selected, valid_lengths.tolist(), dim=0)
         return split_result
-    
+
     def calculate_dimensions(self, target_area, ratio):
         import math
         width = math.sqrt(target_area * ratio)
@@ -532,11 +532,11 @@ class QwenImageUnit_PromptEmbedder(PipelineUnit):
         width = round(width / 32) * 32
         height = round(height / 32) * 32
         return width, height
-    
+
     def resize_image(self, image, target_area=384*384):
         width, height = self.calculate_dimensions(target_area, image.size[0] / image.size[1])
         return image.resize((width, height))
-    
+
     def encode_prompt(self, pipe: QwenImagePipeline, prompt):
         template = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
         drop_idx = 34
@@ -548,7 +548,7 @@ class QwenImageUnit_PromptEmbedder(PipelineUnit):
         split_hidden_states = self.extract_masked_hidden(hidden_states, model_inputs.attention_mask)
         split_hidden_states = [e[drop_idx:] for e in split_hidden_states]
         return split_hidden_states
-        
+
     def encode_prompt_edit(self, pipe: QwenImagePipeline, prompt, edit_image):
         template =  "<|im_start|>system\nDescribe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{}<|im_end|>\n<|im_start|>assistant\n"
         drop_idx = 64
@@ -558,7 +558,7 @@ class QwenImageUnit_PromptEmbedder(PipelineUnit):
         split_hidden_states = self.extract_masked_hidden(hidden_states, model_inputs.attention_mask)
         split_hidden_states = [e[drop_idx:] for e in split_hidden_states]
         return split_hidden_states
-    
+
     def encode_prompt_edit_multi(self, pipe: QwenImagePipeline, prompt, edit_image):
         template =  "<|im_start|>system\nDescribe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
         drop_idx = 64
@@ -613,7 +613,7 @@ class QwenImageUnit_EntityControl(PipelineUnit):
             txt = [template.format(e) for e in prompt]
             txt_tokens = pipe.tokenizer(txt, max_length=1024+drop_idx, padding=True, truncation=True, return_tensors="pt").to(pipe.device)
             hidden_states = pipe.text_encoder(input_ids=txt_tokens.input_ids, attention_mask=txt_tokens.attention_mask, output_hidden_states=True,)[-1]
-            
+
             split_hidden_states = self.extract_masked_hidden(hidden_states, txt_tokens.attention_mask)
             split_hidden_states = [e[drop_idx:] for e in split_hidden_states]
             attn_mask_list = [torch.ones(e.size(0), dtype=torch.long, device=e.device) for e in split_hidden_states]
@@ -699,7 +699,7 @@ class QwenImageUnit_BlockwiseControlNet(PipelineUnit):
         pipe.load_models_to_device(self.onload_model_names)
         conditionings = []
         for controlnet_input in blockwise_controlnet_inputs:
-            image = controlnet_input.image
+            image = controlnet_input.images
             if controlnet_input.inpaint_mask is not None:
                 image = self.apply_controlnet_mask_on_image(pipe, image, controlnet_input.inpaint_mask)
 
@@ -709,7 +709,7 @@ class QwenImageUnit_BlockwiseControlNet(PipelineUnit):
             if controlnet_input.inpaint_mask is not None:
                 image = self.apply_controlnet_mask_on_latents(pipe, image, controlnet_input.inpaint_mask)
             conditionings.append(image)
-            
+
         return {"blockwise_controlnet_conditioning": conditionings}
 
 
@@ -798,7 +798,7 @@ def model_fn_qwen_image(
     img_shapes = [(latents.shape[0], latents.shape[2]//2, latents.shape[3]//2)]
     txt_seq_lens = prompt_emb_mask.sum(dim=1).tolist()
     timestep = timestep / 1000
-    
+
     image = rearrange(latents, "B C (H P) (W Q) -> B (H W) (C P Q)", H=height//16, W=width//16, P=2, Q=2)
     image_seq_len = image.shape[1]
 
@@ -827,7 +827,7 @@ def model_fn_qwen_image(
         else:
             image_rotary_emb = dit.pos_embed(img_shapes, txt_seq_lens, device=latents.device)
         attention_mask = None
-        
+
     if blockwise_controlnet_conditioning is not None:
         blockwise_controlnet_conditioning = blockwise_controlnet.preprocess(
             blockwise_controlnet_inputs, blockwise_controlnet_conditioning)
@@ -852,10 +852,10 @@ def model_fn_qwen_image(
                 progress_id=progress_id, num_inference_steps=num_inference_steps,
             )
             image[:, :image_seq_len] = image_slice + controlnet_output
-    
+
     image = dit.norm_out(image, conditioning)
     image = dit.proj_out(image)
     image = image[:, :image_seq_len]
-    
+
     latents = rearrange(image, "B (H W) (C P Q) -> B C (H P) (W Q)", H=height//16, W=width//16, P=2, Q=2)
     return latents

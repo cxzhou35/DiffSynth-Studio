@@ -1,9 +1,9 @@
 #!/bin/bash
 
-DATA_ROOT="data/old_tim_1440p_300f"
+DATA_ROOT="data/old_tim_1440p_240f"
 INPUT_IMAGE_DIR="${DATA_ROOT}/gt_images_1440p"
 COND_IMAGE_DIR="${DATA_ROOT}/lq_images_720p"
-PROMPT="An East Asian man wearing glasses is being filmed by a professional multi-camera rig for an interview in a brightly modern room."
+PROMPT="A man wearing glasses is being filmed by a professional multi-camera rig in a brightly modern room."
 COND_TYPES=("controlnet" "kontext")
 
 for COND_TYPE in "${COND_TYPES[@]}"; do
@@ -15,5 +15,6 @@ for COND_TYPE in "${COND_TYPES[@]}"; do
         --meta_type json \
         --cond_type ${COND_TYPE} \
         --split train \
-        --frame_range 0 240 1
+        --frame_range 0 240 1 \
+        --view_range 32 60 1
 done

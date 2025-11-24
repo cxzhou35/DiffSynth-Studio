@@ -15,7 +15,7 @@ def check_dir_format(image_dir: str) -> str:
         raise ValueError(f"Invalid image directory format: {image_dir}")
 
 
-def construct_cond_data(image_dir: str, cond_image_dir: str, prompt: str, metafile_path: str, cond_type: str, remove_prefix: str, frame_range: list[int]):
+def construct_cond_data(image_dir: str, cond_image_dir: str, prompt: str, metafile_path: str, cond_type: str, remove_prefix: str, frame_range: list[int], view_range: list[int]):
     # check input and cond image directory format
     image_dir_format = check_dir_format(image_dir)
     cond_image_dir_format = check_dir_format(cond_image_dir)
@@ -26,11 +26,12 @@ def construct_cond_data(image_dir: str, cond_image_dir: str, prompt: str, metafi
     total_pair_num = 0
 
     s, e, t = frame_range
+    vs, ve, vt = view_range
 
     # construct condition data and write to metadata file
     # NOTE: data format: evc image_dir/view_dir/image
     if image_dir_format == "evc":
-        view_dirs = sorted(os.listdir(image_dir))
+        view_dirs = sorted(os.listdir(image_dir))[vs:ve+1:vt]
         log(f"Found {len(view_dirs)} views in {image_dir}")
         if metafile_type == "csv":
             metafile_handler.update_data_container(["image", "prompt", f"{cond_type}_images", "view_id", "frame_id"])
@@ -90,6 +91,7 @@ def parse_args():
     parser.add_argument("-s", "--split", type=str, default="train", help="Dataset split (train, test, eval)")
     parser.add_argument("-rp", "--remove_prefix", type=str, default="data/old_tim_1440p_120f/", help="Remove prefix in path")
     parser.add_argument("-fr", "--frame_range", nargs=3, type=int, help="Frame ranges for data selecting")
+    parser.add_argument("-vr", "--view_range", nargs=3, type=int, help="View ranges for data selecting")
 
     parse_args = parser.parse_args()
     return parse_args
@@ -106,10 +108,11 @@ def main():
     split = args.split
     remove_prefix = args.remove_prefix
     frame_range = args.frame_range
+    view_range = args.view_range
 
     os.makedirs(output_dir, exist_ok=True)
     metafile_path = os.path.join(output_dir, f"metadata_{split}.{meta_type}")
-    total_pair_num = construct_cond_data(image_dir, cond_image_dir, prompt, metafile_path, cond_type, remove_prefix, frame_range)
+    total_pair_num = construct_cond_data(image_dir, cond_image_dir, prompt, metafile_path, cond_type, remove_prefix, frame_range, view_range)
     log(f"Constructed {total_pair_num} {cond_type} condition data pairs.")
     log(f"Saved metadata to {metafile_path}")
 
