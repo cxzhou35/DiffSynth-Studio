@@ -29,6 +29,7 @@ class FluxTrainingModule(DiffusionTrainingModule):
         temporal_window_size=1,
         spatial_window_size=1,
         dit_3d_attn_interval=None,
+        use_3d_rope=False,
     ):
         super().__init__()
         # Load models
@@ -60,6 +61,7 @@ class FluxTrainingModule(DiffusionTrainingModule):
         self.temporal_window_size= temporal_window_size
         self.spatial_window_size = spatial_window_size
         self.dit_3d_attn_interval = dit_3d_attn_interval
+        self.use_3d_rope = use_3d_rope
 
     def forward_preprocess(self, datas):
         # CFG-sensitive parameters
@@ -96,6 +98,7 @@ class FluxTrainingModule(DiffusionTrainingModule):
             "temporal_window_size": self.temporal_window_size,
             "spatial_window_size": self.spatial_window_size,
             "dit_3d_attn_interval": self.dit_3d_attn_interval,
+            "use_3d_rope": self.use_3d_rope,
         }
 
         # Extra inputs
@@ -182,6 +185,7 @@ def main():
         temporal_window_size=args.temporal_window_size,
         spatial_window_size=args.spatial_window_size,
         dit_3d_attn_interval=args.dit_3d_attn_interval,
+        use_3d_rope=args.use_3d_rope,
     )
 
     # set logger

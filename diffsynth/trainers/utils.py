@@ -721,6 +721,7 @@ def flux_parser():
     parser.add_argument("--seed", type=int, default=24, help="RNG seed for training.")
     parser.add_argument("--use_tem_key_frame", default=False, action="store_true", help="Whether to use key frame for temporal condition.")
     parser.add_argument("--key_frame_chunk", type=int, default=4, help="Chunk size for key frames if used.")
+    parser.add_argument("--use_3d_rope", default=False, action="store_true", help="Whether to use 3d RoPE for temporal condition.")
     return parser
 
 

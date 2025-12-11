@@ -788,6 +788,7 @@ def model_fn_flux_image(
     use_gradient_checkpointing=False,
     use_gradient_checkpointing_offload=False,
     dit_3d_attn_interval=None,
+    use_3d_rope=False,
     **kwargs
 ):
     if tiled:
@@ -843,6 +844,13 @@ def model_fn_flux_image(
 
     if image_ids is None:
         image_ids = dit.prepare_image_ids(hidden_states)
+
+    if use_3d_rope:
+        # fill the first channel with frame/time indices for 3D RoPE
+        num_frames = image_ids.shape[0]
+        frame_ids = torch.arange(num_frames, device=image_ids.device, dtype=image_ids.dtype)
+        image_ids = image_ids.clone()
+        image_ids[..., 0] = frame_ids[:, None]
 
     conditioning = dit.time_embedder(timestep, hidden_states.dtype) + dit.pooled_text_embedder(pooled_prompt_emb)
     if dit.guidance_embedder is not None:
