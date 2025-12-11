@@ -78,6 +78,8 @@ class FluxControlNet(torch.nn.Module):
             processor_id = repeat(processor_id, "D -> B D", B=1).to(text_ids.device)
             prompt_emb = torch.concat([self.controlnet_mode_embedder(processor_id), prompt_emb], dim=1)
             text_ids = torch.cat([text_ids[:, :1], text_ids], dim=1)
+        # TODO: align the text ids with image ids
+        text_ids = repeat(text_ids, '1 ... -> b ...', b=image_ids.shape[0])
         image_rotary_emb = self.pos_embedder(torch.cat((text_ids, image_ids), dim=1))
 
         hidden_states = self.patchify(hidden_states)

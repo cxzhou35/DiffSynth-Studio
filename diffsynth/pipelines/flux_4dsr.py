@@ -658,15 +658,26 @@ class FluxImageUnit_ControlNet(PipelineUnit):
         pipe.load_models_to_device(['vae_encoder'])
         conditionings = []
         for controlnet_input in controlnet_inputs:
-            image = controlnet_input.images
-            if controlnet_input.inpaint_mask is not None:
-                image = self.apply_controlnet_mask_on_image(pipe, image, controlnet_input.inpaint_mask)
+            images = controlnet_input.images
 
-            image = pipe.preprocess_image(image).to(device=pipe.device, dtype=pipe.torch_dtype)
-            image = pipe.vae_encoder(image, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+            if len(images) > 1:
+                # TODO: multi controlnet image
+                image_stack = []
+                for image in images:
+                    image = pipe.preprocess_image(image).to(device=pipe.device, dtype=pipe.torch_dtype)
+                    image = pipe.vae_encoder(image, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+                    image_stack.append(image)
+                image = torch.cat(image_stack, dim=0) # (B, C, H, W)
+            else:
+                if controlnet_input.inpaint_mask is not None:
+                    image = self.apply_controlnet_mask_on_image(pipe, images, controlnet_input.inpaint_mask)
 
-            if controlnet_input.inpaint_mask is not None:
-                image = self.apply_controlnet_mask_on_latents(pipe, image, controlnet_input.inpaint_mask)
+                image = pipe.preprocess_image(image).to(device=pipe.device, dtype=pipe.torch_dtype)
+                image = pipe.vae_encoder(image, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+
+                if controlnet_input.inpaint_mask is not None:
+                    image = self.apply_controlnet_mask_on_latents(pipe, image, controlnet_input.inpaint_mask)
+
             conditionings.append(image)
         return {"controlnet_conditionings": conditionings}
 
@@ -825,6 +836,7 @@ def model_fn_flux_image(
             "progress_id": progress_id,
             "num_inference_steps": num_inference_steps,
         }
+        # TODO: whether use the individual controlnet inputs?
         controlnet_res_stack, controlnet_single_res_stack = controlnet(
             controlnet_conditionings, **controlnet_extra_kwargs
         )
@@ -884,7 +896,7 @@ def model_fn_flux_image(
             # ControlNet
             if controlnet is not None and controlnet_conditionings is not None and controlnet_res_stack is not None:
                 if kontext_latents is None:
-                    hidden_states = hidden_states + controlnet_res_stack[block_id]
+                    hidden_states = hidden_states + controlnet_res_stack[block_id] # (B, S, C) + (B, S, C)
                 else:
                     hidden_states[:, :-kontext_latents.shape[1]] = hidden_states[:, :-kontext_latents.shape[1]] + controlnet_res_stack[block_id]
 

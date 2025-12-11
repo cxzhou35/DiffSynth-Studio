@@ -1,14 +1,15 @@
 #! /bin/bash
 
-COND_IMAGE="/home/vercent/codes/DiffSynth-Studio/data/old_tim_1440p_120f/lq_images_720p"
-DIR=($(seq -f "%02g" 42 45))
+# COND_IMAGE="/home/vercent/codes/DiffSynth-Studio/data/old_tim_1440p_240f/lq_images_720p_resize"
+COND_IMAGE="/home/vercent/codes/minivolcap2/data/old_tim/cache/images_crop_lr/"
+DIR=($(seq -f "%02g" 6 7))
 
-PROMPT="Enhance image clarity and resolution while keeping the content identical. super-resolution, high detail, 4K clarity, same composition, natural texture."
-# PROMPT="An East Asian man wearing glasses is being filmed by a professional multi-camera rig for an interview in a brightly modern room."
+# PROMPT="Enhance image clarity and resolution while keeping the content identical. super-resolution, high detail, 4K clarity, same composition, natural texture."
+PROMPT="A man wearing glasses is being filmed by a professional multi-camera rig in a brightly modern room."
 HEIGHT=1440
 WIDTH=2560
-CKPT_PATH="/home/vercent/codes/DiffSynth-Studio/outputs/old_tim_1440p_120f_20251118090243/FLUX.1-Kontext-dev-lora-3d_attn_window_size_3_kontext_image_token_align/epoch-4-step-4350.safetensors"
-OUTPUT_DIR="outputs/old_tim_1440p_120f/train_lora_finetune/inference/train_data_eval_new"
+CKPT_PATH="/home/vercent/codes/DiffSynth-Studio/outputs/old_tim_1440p_240f_20251126060437/FLUX.1-Kontext-dev-lora-wo_3d_attn_deg_resize/epoch-1-step-6960.safetensors"
+OUTPUT_DIR="outputs/old_tim_1440p_crop_sr/FLUX.1-Kontext-dev-lora-wo_3d_attn_deg_resize/inference/train_data_eval_new"
 
 # for loop for the DIR
 for d in "${DIR[@]}"; do

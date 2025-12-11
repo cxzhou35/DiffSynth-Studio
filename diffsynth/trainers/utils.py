@@ -12,6 +12,7 @@ from tqdm import tqdm
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration
 from ..utils.base_utils import DotDict
+from ..utils.rand_utils import init_global_seed, worker_init_fn_base, get_rand_seed
 
 
 def _sanitize_tracker_config(config: dict | None) -> dict[str, Any] | None:
@@ -585,17 +586,13 @@ def launch_training_task(
         resume_from_ckpt = args.resume_from_ckpt
         project_name = args.project_name
         tracker_config = dict(vars(args))
+        base_seed = args.seed
 
     tracker_config = _sanitize_tracker_config(tracker_config)
 
     optimizer = torch.optim.AdamW(model.trainable_modules(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer)
 
-    train_dataloader = torch.utils.data.DataLoader(datasets['train'], shuffle=True, collate_fn=lambda x: x[0], num_workers=num_workers)
-    if 'val' in datasets:
-        val_dataloader = torch.utils.data.DataLoader(datasets['val'], shuffle=False, collate_fn=lambda x: x[0], num_workers=num_workers)
-    else:
-        val_dataloader = None
 
     accelerator_project_config = ProjectConfiguration(project_dir=output_dir, logging_dir=logging_dir)
     accelerator = Accelerator(
@@ -605,6 +602,16 @@ def launch_training_task(
         project_config=accelerator_project_config,
         kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=find_unused_parameters)],
     )
+
+    rank_id = accelerator.process_index
+    init_global_seed(rank=rank_id, seed=base_seed)
+    worker_init_fn = partial(worker_init_fn_base, rank_id=rank_id)
+    train_dataloader = torch.utils.data.DataLoader(datasets['train'], shuffle=True, generator=torch.Generator().manual_seed(get_rand_seed(rank_id)), collate_fn=lambda x: x[0], num_workers=num_workers, worker_init_fn=worker_init_fn)
+    if 'val' in datasets:
+        val_dataloader = torch.utils.data.DataLoader(datasets['val'], shuffle=False, collate_fn=lambda x: x[0], num_workers=num_workers)
+    else:
+        val_dataloader = None
+
     model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, train_dataloader, scheduler)
     if accelerator.is_main_process:
         accelerator.init_trackers(project_name, tracker_config)
@@ -711,6 +718,9 @@ def flux_parser():
     parser.add_argument("--use_freq_loss", default=False, action="store_true", help="Whether use frequency loss in trianing.")
     parser.add_argument("--freq_loss_weights", type=float, default=0.01, help="Weights for freequency loss if used.")
     parser.add_argument("--project_name", type=str, default="test", help="Project name for logging.")
+    parser.add_argument("--seed", type=int, default=24, help="RNG seed for training.")
+    parser.add_argument("--use_tem_key_frame", default=False, action="store_true", help="Whether to use key frame for temporal condition.")
+    parser.add_argument("--key_frame_chunk", type=int, default=4, help="Chunk size for key frames if used.")
     return parser
 
 

@@ -33,6 +33,8 @@ class MultiVideoDataset(torch.utils.data.Dataset):
         temporal_window_size=4,
         use_spatial_sample=False,
         spatial_window_size=4,
+        use_tem_key_frame=False,
+        key_frame_chunk=None,
         main_data_operator=lambda x: x,
         special_operator_map=None,
     ):
@@ -48,6 +50,8 @@ class MultiVideoDataset(torch.utils.data.Dataset):
         self.load_from_cache = metadata_path is None
         self.temporal_window_size = temporal_window_size if use_temporal_sample else 1
         self.spatial_window_size = spatial_window_size if use_spatial_sample else 1
+        self.use_tem_key_frame = use_tem_key_frame
+        self.key_frame_chunk = key_frame_chunk if use_tem_key_frame else 1
         self.load_metadata(metadata_path)
         self.parse_metadata()
 
@@ -148,6 +152,16 @@ class MultiVideoDataset(torch.utils.data.Dataset):
 
         return data_ids
 
+    def get_controlnet_key_frame(self, data_id, key_data_key="controlnet_images"):
+        data_id = self.data[data_id % len(self.data)]
+        frame_id = int(data_id['frame_id'])
+        key_frame_id = (frame_id // self.key_frame_chunk) * self.key_frame_chunk
+        if key_frame_id > self.frame_ids[0] and frame_id % self.key_frame_chunk == 0:
+            key_frame_id -= 1
+        assert key_frame_id in self.frame_ids, f"Key frame id {key_frame_id} not in frame ids."
+        return self.data[key_frame_id-self.frame_ids[0]][key_data_key]
+
+
     def __getitem__(self, data_id):
         if self.load_from_cache:
             data = self.cached_data[data_id % len(self.cached_data)]
@@ -164,8 +178,27 @@ class MultiVideoDataset(torch.utils.data.Dataset):
                             data[key] = self.special_operator_map[key](data[key])
                         elif key in self.data_file_keys:
                             data[key] = self.main_data_operator(data[key])
+                if self.use_tem_key_frame:
+                    data['controlnet_key_images'] = self.main_data_operator(
+                        self.get_controlnet_key_frame(id, key_data_key="controlnet_images")
+                    )
                 datas.append(data)
             return datas
+
+            # data = self.data[id].copy()
+            # for key in self.data_file_keys:
+            #     values = []
+            #     for id in data_ids:
+            #         data_copy = self.data[id].copy()
+            #         if key in data_copy:
+            #             if key in self.special_operator_map:
+            #                 value = self.special_operator_map[key](data_copy[key])
+            #             elif key in self.data_file_keys:
+            #                 value = self.main_data_operator(data_copy[key])
+            #             values.append(value)
+            #     data[key] = values
+            # return data
+
 
     def __len__(self):
         if self.load_from_cache:

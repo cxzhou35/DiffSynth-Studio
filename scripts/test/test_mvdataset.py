@@ -30,9 +30,11 @@ def main():
         repeat=1,
         data_file_keys=args.data_file_keys.split(","),
         use_temporal_sample=True,
-        temporal_window_size=4,
+        temporal_window_size=1,
         use_spatial_sample=True,
-        spatial_window_size=4,
+        spatial_window_size=1,
+        use_tem_key_frame=True,
+        key_frame_chunk=4,
         main_data_operator=MultiVideoDataset.default_image_operator(
             base_path=args.dataset_base_path,
             max_pixels=args.max_pixels,
@@ -43,7 +45,7 @@ def main():
         )
     )
 
-    data = dataset.__getitem__(120)
+    data = dataset.__getitem__(119)
     breakpoint()
     # dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=8)
     # for data in tqdm(dataloader):

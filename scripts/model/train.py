@@ -103,8 +103,8 @@ class FluxTrainingModule(DiffusionTrainingModule):
         for extra_input in self.extra_inputs:
             if extra_input.startswith("controlnet_"):
                 # TODO: controlnet inputs dont support multi sample now
-                # controlnet_input[extra_input.replace("controlnet_", "")] = [data[extra_input] for data in datas]
-                controlnet_input[extra_input.replace("controlnet_", "")] = datas[0][extra_input]
+                # controlnet_input[extra_input.replace("controlnet_", "")] = datas[0][extra_input]
+                controlnet_input[extra_input.replace("controlnet_", "")] = [data[extra_input] for data in datas]
             else:
                 inputs_shared[extra_input] = [data[extra_input] for data in datas]
         if len(controlnet_input) > 0:
@@ -140,6 +140,8 @@ def main():
             temporal_window_size=args.temporal_window_size,
             use_spatial_sample=args.use_spatial_sample,
             spatial_window_size=args.spatial_window_size,
+            use_tem_key_frame=args.use_tem_key_frame,
+            key_frame_chunk=args.key_frame_chunk,
             main_data_operator=MultiVideoDataset.default_image_operator(
                 base_path=args.dataset_base_path,
                 height=args.height,
