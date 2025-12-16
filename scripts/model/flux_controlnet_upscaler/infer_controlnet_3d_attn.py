@@ -1,6 +1,6 @@
 import torch
-from diffsynth.pipelines.flux_image_new import ModelConfig, ControlNetInput
-from diffsynth.pipelines.flux_4dsr import Flux4DSRPipeline
+from diffsynth.pipelines.flux_image_new import ModelConfig
+from diffsynth.pipelines.flux_4dsr import Flux4DSRPipeline, ControlNetInput
 from PIL import Image
 import argparse
 import os
@@ -21,6 +21,9 @@ def parse_args():
     parser.add_argument("--fps", type=int, default=60, help="FPS of video")
     parser.add_argument("--relative_frame_range", nargs=3, type=int, help="Relative frame ranges")
     parser.add_argument("--view_range", nargs=3, type=int, help="View ranges")
+    parser.add_argument("--use_3d_attn", action="store_true", help="Whether use 3D attention")
+    parser.add_argument("--attn_window_size", type=int, default=3, help="3D attention window size")
+    parser.add_argument("--use_3d_rope", action="store_true", help="Whether use 3D RoPE")
     return parser.parse_args()
 
 def get_evc_paths(cond_image, relative_frame_range, view_range):
@@ -74,6 +77,9 @@ def main(args):
     save_video = args.save_video
     relative_frame_range = args.relative_frame_range
     view_range = args.view_range
+    use_3d_attn = args.use_3d_attn
+    attn_window_size = args.attn_window_size
+    use_3d_rope = args.use_3d_rope
 
     image_save_dir = os.path.join(output_dir, "images")
     os.makedirs(image_save_dir, exist_ok=True)
@@ -105,43 +111,53 @@ def main(args):
     )
     pipe.load_lora(pipe.dit, ckpt_path, alpha=1)
 
-    for image_path in tqdm(cond_image_paths, desc="Inferring with Flux.1-dev-Controlnet-Upscaler", total=len(cond_image_paths)):
-        cond_image = Image.open(image_path)
-        cond_image = cond_image.resize((width, height))
+    # chunk size the inputs image for 3d attention
+    cond_image_paths = [cond_image_paths[i:i+attn_window_size] for i in range(0, len(cond_image_paths), attn_window_size)]
 
-        image_file = os.path.basename(image_path)
-        view_dir = os.path.basename(os.path.dirname(image_path))
-        pred_image_save_path = os.path.join(image_save_dir, "pred", view_dir, image_file)
-        concat_image_save_path = os.path.join(image_save_dir, "concat", view_dir, image_file)
-        os.makedirs(os.path.dirname(pred_image_save_path), exist_ok=True)
-        os.makedirs(os.path.dirname(concat_image_save_path), exist_ok=True)
+    for image_paths in tqdm(cond_image_paths, desc="Inferring with Flux.1-dev-Controlnet-Upscaler", total=len(cond_image_paths)):
+        cond_images = []
+        for img_path in image_paths:
+            img = Image.open(img_path)
+            img = img.resize((width, height))
+            cond_images.append(img)
 
         # model inference
-        pred_image = pipe(
+        pred_images = pipe(
             prompt=prompt,
             controlnet_inputs=[ControlNetInput(
-                images=cond_image,
+                images=cond_images,
                 scale=0.9
             )],
             height=height,
             width=width,
             seed=0, rand_device="cuda",
+            num_inference_steps=30,
+            num_samples=len(cond_images),
+            dit_3d_attn_interval=3,
+            use_3d_rope=use_3d_rope,
         )
 
-        concat_image = Image.new('RGB', (width * 2, height))
-        concat_image.paste(cond_image, (0, 0))
-        concat_image.paste(pred_image, (width, 0))
+        for idx, img_path in enumerate(image_paths):
+            image_file = os.path.basename(img_path)
+            view_dir = os.path.basename(os.path.dirname(img_path))
+            pred_image_save_path = os.path.join(image_save_dir, "pred", view_dir, image_file)
+            concat_image_save_path = os.path.join(image_save_dir, "concat", view_dir, image_file)
+            os.makedirs(os.path.dirname(pred_image_save_path), exist_ok=True)
+            os.makedirs(os.path.dirname(concat_image_save_path), exist_ok=True)
+            concat_image = Image.new('RGB', (width * 2, height))
+            concat_image.paste(cond_images[idx], (0, 0))
+            concat_image.paste(pred_images[idx], (width, 0))
 
-        # save images
-        pred_image.save(pred_image_save_path)
-        concat_image.save(concat_image_save_path)
+            # save images
+            pred_images[idx].save(pred_image_save_path)
+            concat_image.save(concat_image_save_path)
 
-        if save_video:
-            # ensure uint8 RGB before writing to avoid malformed mp4
-            pred_frame = cv2.cvtColor(np.array(pred_image, dtype=np.uint8), cv2.COLOR_RGB2BGR)
-            concat_frame = cv2.cvtColor(np.array(concat_image, dtype=np.uint8), cv2.COLOR_RGB2BGR)
-            video_dict[f'{view_dir}_pred'].write(pred_frame)
-            video_dict[f'{view_dir}_concat'].write(concat_frame)
+            if save_video:
+                # ensure uint8 RGB before writing to avoid malformed mp4
+                pred_frame = cv2.cvtColor(np.array(pred_images[idx], dtype=np.uint8), cv2.COLOR_RGB2BGR)
+                concat_frame = cv2.cvtColor(np.array(concat_image, dtype=np.uint8), cv2.COLOR_RGB2BGR)
+                video_dict[f'{view_dir}_pred'].write(pred_frame)
+                video_dict[f'{view_dir}_concat'].write(concat_frame)
 
     if save_video:
         for video_writer in video_dict.values():

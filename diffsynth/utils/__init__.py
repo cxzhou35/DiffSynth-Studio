@@ -1,7 +1,7 @@
 import torch, warnings, glob, os
 import numpy as np
 from PIL import Image
-from einops import repeat, reduce
+from einops import repeat, reduce, rearrange
 from typing import Optional, Union
 from dataclasses import dataclass
 from modelscope import snapshot_download
@@ -86,6 +86,7 @@ class BasePipeline(torch.nn.Module):
     def vae_output_to_video(self, vae_output, pattern="B C T H W", min_value=-1, max_value=1):
         # Transform a torch.Tensor to list of PIL.Image
         if pattern != "T H W C":
+            vae_output = rearrange(vae_output, f"B C H W -> 1 C B H W")
             vae_output = reduce(vae_output, f"{pattern} -> T H W C", reduction="mean")
         video = [self.vae_output_to_image(image, pattern="H W C", min_value=min_value, max_value=max_value) for image in vae_output]
         return video

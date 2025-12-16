@@ -40,10 +40,9 @@ class ControlNetInput:
     scale: float = 1.0
     start: float = 1.0
     end: float = 0.0
-    image: Image.Image = None
+    images: Image.Image = None
     inpaint_mask: Image.Image = None
     processor_id: str = None
-
 
 
 class MultiControlNet(torch.nn.Module):
@@ -408,7 +407,6 @@ class Flux4DSRPipeline(BasePipeline):
         # Shape
         height: int = 1024,
         width: int = 1024,
-        num_samples: int = 1,
         # Randomness
         seed: int = None,
         rand_device: str = "cpu",
@@ -435,6 +433,10 @@ class Flux4DSRPipeline(BasePipeline):
         tiled: bool = False,
         tile_size: int = 128,
         tile_stride: int = 64,
+        # 3d attn
+        dit_3d_attn_interval: int = 3,
+        use_3d_rope: bool = False,
+        num_samples: int = 1,
         # Progress bar
         progress_bar_cmd = tqdm,
     ):
@@ -462,6 +464,8 @@ class Flux4DSRPipeline(BasePipeline):
             "tea_cache_l1_thresh": tea_cache_l1_thresh,
             "tiled": tiled, "tile_size": tile_size, "tile_stride": tile_stride,
             "progress_bar_cmd": progress_bar_cmd,
+            "dit_3d_attn_interval": dit_3d_attn_interval,
+            "use_3d_rope": use_3d_rope,
         }
         for unit in self.units:
             inputs_shared, inputs_posi, inputs_nega = self.unit_runner(unit, self, inputs_shared, inputs_posi, inputs_nega)
@@ -486,7 +490,10 @@ class Flux4DSRPipeline(BasePipeline):
         # Decode
         self.load_models_to_device(['vae_decoder'])
         image = self.vae_decoder(inputs_shared["latents"], device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
-        image = self.vae_output_to_image(image)
+        if image.shape[0] > 1:
+            image = self.vae_output_to_video(image)
+        else:
+            image = self.vae_output_to_image(image)
         self.load_models_to_device([])
 
         return image
@@ -789,6 +796,7 @@ def model_fn_flux_image(
     use_gradient_checkpointing_offload=False,
     dit_3d_attn_interval=None,
     use_3d_rope=False,
+    num_samples=1,
     **kwargs
 ):
     if tiled:
@@ -944,6 +952,6 @@ def model_fn_flux_image(
     if kontext_latents is not None:
         hidden_states = hidden_states[:, :-kontext_latents.shape[1]]
 
-    hidden_states = dit.unpatchify(hidden_states, height, width)
+    hidden_states = dit.unpatchify(hidden_states, height, width) # (B, C, H, W)
 
     return hidden_states

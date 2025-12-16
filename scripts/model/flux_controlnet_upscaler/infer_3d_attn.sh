@@ -9,7 +9,7 @@ CKPT_PATH="/home/vercent/codes/DiffSynth-Studio/outputs/old_tim_1440p_240f_20251
 OUTPUT_DIR="outputs/flux_controlnet_upscaler_lora_3d_attn_wo_3d_rope_epoch_2/crop_eval_0_119f"
 
 # for loop to the DIR
-CUDA_VISIBLE_DEVICES=0 python3 scripts/model/flux_controlnet_upscaler/infer_controlnet.py \
+CUDA_VISIBLE_DEVICES=0 python3 scripts/model/flux_controlnet_upscaler/infer_controlnet_3d_attn.py \
     --cond_image "$COND_IMAGE" \
     --prompt "${PROMPT}" \
     --height $HEIGHT \
@@ -18,4 +18,6 @@ CUDA_VISIBLE_DEVICES=0 python3 scripts/model/flux_controlnet_upscaler/infer_cont
     --output_dir "$OUTPUT_DIR" \
     --relative_frame_range 0 119 1 \
     --view_range 8 10 1 \
-    --save_video
+    --save_video \
+    --use_3d_attn \
+    --attn_window_size 4
