@@ -28,8 +28,7 @@ def parse_args():
 
 def get_evc_paths(cond_image, relative_frame_range, view_range):
     vs, ve, vt = view_range
-    view_dirs = [f"{dir:02d}" for dir in range(vs, ve+1, vt)]
-    # view_dirs = sorted(os.listdir(cond_image))[vs:ve+1:vt]
+    view_dirs = sorted(os.listdir(cond_image))[vs:ve+1:vt]
     image_paths = []
     view_dirs_copy = view_dirs.copy()
     for view_dir in view_dirs_copy:
