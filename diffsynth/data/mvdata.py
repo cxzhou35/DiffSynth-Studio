@@ -117,12 +117,12 @@ class MultiVideoDataset(torch.utils.data.Dataset):
     def parse_metadata(self):
         extract_cam_id = lambda x: int(x['view_id'])
         extract_frame_id = lambda x: int(x['frame_id'])
-        max_cam_id, min_cam_id = max(extract_cam_id(x) for x in self.data), min(extract_cam_id(x) for x in self.data)
-        self.cam_ids = list(range(min_cam_id, max_cam_id + 1))
+        self.cam_ids = sorted(set(extract_cam_id(x) for x in self.data))
         self.n_cams = len(self.cam_ids)
         max_frame_id, min_frame_id = max(extract_frame_id(x) for x in self.data), min(extract_frame_id(x) for x in self.data)
         self.frame_ids = list(range(min_frame_id, max_frame_id + 1))
         self.n_frames = len(self.frame_ids)
+        self._cam_id_to_idx = {c: i for i, c in enumerate(self.cam_ids)}
 
     def get_mvdata_ids(self, data_id, domain='temporal'):
         data_id = self.data[data_id % len(self.data)]
@@ -138,17 +138,18 @@ class MultiVideoDataset(torch.utils.data.Dataset):
                 temporal_ids = list(range(self.frame_ids[-1]-self.temporal_window_size+1, self.frame_ids[-1]+1))
             else:
                 temporal_ids = list(range(frame_id-self.temporal_window_size//2, frame_id+(self.temporal_window_size+1)//2))
-            data_ids = [self.n_frames*(cam_id-self.cam_ids[0]) + (fid-self.frame_ids[0]) for fid in temporal_ids]
+            data_ids = [self.n_frames*self._cam_id_to_idx[cam_id] + (fid-self.frame_ids[0]) for fid in temporal_ids]
 
         if domain == 'spatial':
-            # Spatial sampling
-            if cam_id-self.cam_ids[0]+1 < self.spatial_window_size:
-                spatial_ids = list(range(self.cam_ids[0], self.cam_ids[0]+self.spatial_window_size))
-            elif self.cam_ids[-1]-cam_id+1 < self.spatial_window_size:
-                spatial_ids = list(range(self.cam_ids[-1]-self.spatial_window_size+1, self.cam_ids[-1]+1))
+            # Spatial sampling (use indices into actual cam list, which may be non-contiguous)
+            cam_idx = self._cam_id_to_idx[cam_id]
+            if cam_idx + 1 < self.spatial_window_size:
+                spatial_idxs = list(range(0, self.spatial_window_size))
+            elif self.n_cams - cam_idx < self.spatial_window_size:
+                spatial_idxs = list(range(self.n_cams - self.spatial_window_size, self.n_cams))
             else:
-                spatial_ids = list(range(cam_id-self.spatial_window_size//2, cam_id+(self.spatial_window_size+1)//2))
-            data_ids = [(sid-self.cam_ids[0])*self.n_frames + (frame_id-self.frame_ids[0]) for sid in spatial_ids]
+                spatial_idxs = list(range(cam_idx - self.spatial_window_size//2, cam_idx + (self.spatial_window_size+1)//2))
+            data_ids = [sidx*self.n_frames + (frame_id-self.frame_ids[0]) for sidx in spatial_idxs]
 
         return data_ids
 
