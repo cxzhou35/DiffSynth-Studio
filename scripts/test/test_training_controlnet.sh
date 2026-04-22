@@ -7,7 +7,8 @@ export NCCL_DEBUG=INFO
 export CUDA_LAUNCH_BLOCKING=1
 export ACCELERATE_DEBUG_MODE="1"
 
-SCENE_ID="old_tim_1440p_240f"
+NUM_EPOCHS=1
+SCENE_ID="old_tim_1440p_120f"
 TIMESTAMP=$(date +"%Y%m%d%H%M%S")
 DATASET_BASE_PATH="data/${SCENE_ID}"
 DATASET_METADATA_PATH="${DATASET_BASE_PATH}/controlnet_data/metadata_train.json"
@@ -15,8 +16,8 @@ OUTPUT_PATH="outputs/debug_${SCENE_ID}_${TIMESTAMP}"
 MAX_PIXELS=921600 # 1280x720 for condition images
 IMG_HEIGHT=1440
 IMG_WIDTH=2560
-DATASET_REPEAT=1
-NUM_EPOCHS=1
+DATASET_REPEAT=2
+NUM_EPOCHS=5
 
 accelerate launch --mixed_precision=bf16 scripts/model/train.py \
   --dataset_base_path $DATASET_BASE_PATH \
