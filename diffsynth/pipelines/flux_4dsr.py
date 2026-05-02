@@ -71,6 +71,10 @@ def apply_layout_to_image_ids(image_ids, sample_layout=None, use_3d_rope=False):
     return image_ids
 
 
+def resolve_factorized_block_mode(block_id):
+    return "temporal" if block_id % 4 < 3 else "spatial"
+
+
 class MultiControlNet(torch.nn.Module):
     def __init__(self, models: list[FluxControlNet]):
         super().__init__()
@@ -1203,6 +1207,8 @@ def model_fn_flux_image(
                 image_rotary_emb,
                 attention_mask,
                 num_samples,
+                sample_layout,
+                resolve_factorized_block_mode(block_id),
                 ipadapter_kwargs_list=ipadapter_kwargs_list.get(block_id, None),
             )
             # ControlNet
@@ -1228,6 +1234,8 @@ def model_fn_flux_image(
                 image_rotary_emb,
                 attention_mask,
                 num_samples,
+                sample_layout,
+                resolve_factorized_block_mode(block_id),
                 ipadapter_kwargs_list=ipadapter_kwargs_list.get(block_id + num_joint_blocks, None),
             )
             # ControlNet
