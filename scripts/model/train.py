@@ -70,6 +70,7 @@ class FluxTrainingModule(DiffusionTrainingModule):
         inputs_nega = {"negative_prompt": ""}
 
         # CFG-unsensitive parameters
+        layout_shape = datas[0].get("layout_shape", [1, 1])
         inputs_shared = {
             # Assume you are using this pipeline for inference,
             # please fill in the input parameters.
@@ -80,6 +81,12 @@ class FluxTrainingModule(DiffusionTrainingModule):
             "height": datas[0]["image"].size[1],
             "width": datas[0]["image"].size[0],
             "num_samples": len(datas),
+            "sample_layout": {
+                "layout_type": datas[0].get("layout_type", "single"),
+                "layout_shape": [int(layout_shape[0]), int(layout_shape[1])],
+                "t_indices": [int(data.get("layout_t_idx", 0)) for data in datas],
+                "s_indices": [int(data.get("layout_s_idx", 0)) for data in datas],
+            },
             "kontext_ref_offsets": self.kontext_ref_offsets,
             # loss
             "use_fdl_loss": self.use_fdl_loss,

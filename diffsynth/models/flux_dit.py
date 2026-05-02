@@ -61,9 +61,26 @@ class RoPEEmbedding(torch.nn.Module):
 
 
     def forward(self, ids):
-        n_axes = ids.shape[-1]
-        emb = torch.cat([self.rope(ids[..., i], self.axes_dim[i], self.theta) for i in range(n_axes)], dim=-3)
+        ids = align_position_ids(ids, len(self.axes_dim))
+        emb = torch.cat([self.rope(ids[..., i], self.axes_dim[i], self.theta) for i in range(len(self.axes_dim))], dim=-3)
         return emb.unsqueeze(1)
+
+
+def align_position_ids(ids: torch.Tensor, target_n_axes: int) -> torch.Tensor:
+    current_n_axes = ids.shape[-1]
+    if current_n_axes == target_n_axes:
+        return ids
+    if current_n_axes > target_n_axes:
+        return ids[..., current_n_axes - target_n_axes:]
+    pad_shape = (*ids.shape[:-1], target_n_axes - current_n_axes)
+    pad = torch.zeros(pad_shape, device=ids.device, dtype=ids.dtype)
+    return torch.cat([pad, ids], dim=-1)
+
+
+def concat_position_ids(text_ids: torch.Tensor, image_ids: torch.Tensor, target_n_axes: int) -> torch.Tensor:
+    text_ids = align_position_ids(text_ids, target_n_axes)
+    image_ids = align_position_ids(image_ids, target_n_axes)
+    return torch.cat((text_ids, image_ids), dim=1)
 
 
 
@@ -347,7 +364,7 @@ class AdaLayerNormContinuous(torch.nn.Module):
 class FluxDiT(torch.nn.Module):
     def __init__(self, disable_guidance_embedder=False, input_dim=64, num_blocks=19):
         super().__init__()
-        self.pos_embedder = RoPEEmbedding(3072, 10000, [16, 56, 56])
+        self.pos_embedder = RoPEEmbedding(3072, 10000, [8, 8, 56, 56])
         self.time_embedder = TimestepEmbeddings(256, 3072)
         self.guidance_embedder = None if disable_guidance_embedder else TimestepEmbeddings(256, 3072)
         self.pooled_text_embedder = torch.nn.Sequential(torch.nn.Linear(768, 3072), torch.nn.SiLU(), torch.nn.Linear(3072, 3072))
@@ -375,13 +392,13 @@ class FluxDiT(torch.nn.Module):
 
     def prepare_image_ids(self, latents, iterp_offset=1, use_mv_emb=False):
         batch_size, _, height, width = latents.shape
-        latent_image_ids = torch.zeros(height // 2, width // 2, 3) # half of the latent size for patchifying(2x2)
+        latent_image_ids = torch.zeros(height // 2, width // 2, 4) # [t, s, y, x], half of the latent size for patchifying(2x2)
         if iterp_offset > 1:
-            latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(0, height, iterp_offset)[:, None]
-            latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(0, width, iterp_offset)[None, :]
+            latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(0, height, iterp_offset)[:, None]
+            latent_image_ids[..., 3] = latent_image_ids[..., 3] + torch.arange(0, width, iterp_offset)[None, :]
         else:
-            latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(height // 2)[:, None]
-            latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(width // 2)[None, :]
+            latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(height // 2)[:, None]
+            latent_image_ids[..., 3] = latent_image_ids[..., 3] + torch.arange(width // 2)[None, :]
 
         latent_image_id_height, latent_image_id_width, latent_image_id_channels = latent_image_ids.shape
 
@@ -402,9 +419,9 @@ class FluxDiT(torch.nn.Module):
             batch_size, _, new_H, new_W = latents.shape
         else:
             batch_size, _, height, width = latents.shape
-        latent_image_ids = torch.zeros(height // 2, width // 2, 3)
-        latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(height // 2)[:, None]
-        latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(width // 2)[None, :]
+        latent_image_ids = torch.zeros(height // 2, width // 2, 4)
+        latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(height // 2)[:, None]
+        latent_image_ids[..., 3] = latent_image_ids[..., 3] + torch.arange(width // 2)[None, :]
 
         latent_image_id_height, latent_image_id_width, latent_image_id_channels = latent_image_ids.shape
 
@@ -500,7 +517,7 @@ class FluxDiT(torch.nn.Module):
 
         # positional embedding
         text_ids = torch.cat([text_ids] * (max_masks + 1), dim=1)
-        image_rotary_emb = self.pos_embedder(torch.cat((text_ids, image_ids), dim=1))
+        image_rotary_emb = self.pos_embedder(concat_position_ids(text_ids, image_ids, len(self.pos_embedder.axes_dim)))
         return prompt_emb, image_rotary_emb, attention_mask
 
 
@@ -536,7 +553,7 @@ class FluxDiT(torch.nn.Module):
             prompt_emb, image_rotary_emb, attention_mask = self.process_entity_masks(hidden_states, prompt_emb, entity_prompt_emb, entity_masks, text_ids, image_ids)
         else:
             prompt_emb = self.context_embedder(prompt_emb)
-            image_rotary_emb = self.pos_embedder(torch.cat((text_ids, image_ids), dim=1))
+            image_rotary_emb = self.pos_embedder(concat_position_ids(text_ids, image_ids, len(self.pos_embedder.axes_dim)))
             attention_mask = None
 
         def create_custom_forward(module):

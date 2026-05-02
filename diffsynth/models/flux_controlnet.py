@@ -1,6 +1,6 @@
 import torch
 from einops import rearrange, repeat
-from .flux_dit import RoPEEmbedding, TimestepEmbeddings, FluxJointTransformerBlock, FluxSingleTransformerBlock, RMSNorm
+from .flux_dit import RoPEEmbedding, TimestepEmbeddings, FluxJointTransformerBlock, FluxSingleTransformerBlock, RMSNorm, concat_position_ids
 from .utils import hash_state_dict_keys, init_weights_on_device
 
 
@@ -8,7 +8,7 @@ from .utils import hash_state_dict_keys, init_weights_on_device
 class FluxControlNet(torch.nn.Module):
     def __init__(self, disable_guidance_embedder=False, num_joint_blocks=5, num_single_blocks=10, num_mode=0, mode_dict={}, additional_input_dim=0):
         super().__init__()
-        self.pos_embedder = RoPEEmbedding(3072, 10000, [16, 56, 56])
+        self.pos_embedder = RoPEEmbedding(3072, 10000, [8, 8, 56, 56])
         self.time_embedder = TimestepEmbeddings(256, 3072)
         self.guidance_embedder = None if disable_guidance_embedder else TimestepEmbeddings(256, 3072)
         self.pooled_text_embedder = torch.nn.Sequential(torch.nn.Linear(768, 3072), torch.nn.SiLU(), torch.nn.Linear(3072, 3072))
@@ -28,9 +28,9 @@ class FluxControlNet(torch.nn.Module):
 
     def prepare_image_ids(self, latents):
         batch_size, _, height, width = latents.shape
-        latent_image_ids = torch.zeros(height // 2, width // 2, 3)
-        latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(height // 2)[:, None]
-        latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(width // 2)[None, :]
+        latent_image_ids = torch.zeros(height // 2, width // 2, 4)
+        latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(height // 2)[:, None]
+        latent_image_ids[..., 3] = latent_image_ids[..., 3] + torch.arange(width // 2)[None, :]
 
         latent_image_id_height, latent_image_id_width, latent_image_id_channels = latent_image_ids.shape
 
@@ -80,7 +80,7 @@ class FluxControlNet(torch.nn.Module):
             text_ids = torch.cat([text_ids[:, :1], text_ids], dim=1)
         # TODO: align the text ids with image ids
         text_ids = repeat(text_ids, '1 ... -> b ...', b=image_ids.shape[0])
-        image_rotary_emb = self.pos_embedder(torch.cat((text_ids, image_ids), dim=1))
+        image_rotary_emb = self.pos_embedder(concat_position_ids(text_ids, image_ids, len(self.pos_embedder.axes_dim)))
 
         hidden_states = self.patchify(hidden_states)
         hidden_states = self.x_embedder(hidden_states)

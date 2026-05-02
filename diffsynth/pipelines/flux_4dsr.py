@@ -20,7 +20,7 @@ from ..prompters import FluxPrompter
 from ..schedulers import FlowMatchScheduler
 from ..models.tiler import FastTileWorker
 from ..lora.flux_lora import FluxLoRAFuser, FluxLoRALoader, FluxLoraPatcher
-from ..models.flux_dit import RMSNorm
+from ..models.flux_dit import RMSNorm, concat_position_ids
 from ..vram_management import (
     AutoWrappedLinear,
     AutoWrappedModule,
@@ -43,6 +43,32 @@ class ControlNetInput:
     images: Image.Image = None
     inpaint_mask: Image.Image = None
     processor_id: str = None
+
+
+def apply_layout_to_image_ids(image_ids, sample_layout=None, use_3d_rope=False):
+    if image_ids.shape[-1] == 3:
+        pad = torch.zeros((*image_ids.shape[:-1], 1), device=image_ids.device, dtype=image_ids.dtype)
+        image_ids = torch.cat([pad, image_ids], dim=-1)
+    if image_ids.shape[-1] != 4:
+        raise ValueError(f"Expected image_ids with 4 axes after alignment, got shape {tuple(image_ids.shape)}")
+
+    if sample_layout is None and not use_3d_rope:
+        return image_ids
+
+    image_ids = image_ids.clone()
+    batch_size = image_ids.shape[0]
+    if sample_layout is None:
+        t_indices = torch.arange(batch_size, device=image_ids.device, dtype=image_ids.dtype)
+        s_indices = torch.zeros(batch_size, device=image_ids.device, dtype=image_ids.dtype)
+    else:
+        t_indices = torch.as_tensor(sample_layout.get("t_indices", list(range(batch_size))), device=image_ids.device, dtype=image_ids.dtype)
+        s_indices = torch.as_tensor(sample_layout.get("s_indices", [0] * batch_size), device=image_ids.device, dtype=image_ids.dtype)
+        if t_indices.numel() != batch_size or s_indices.numel() != batch_size:
+            raise ValueError(f"sample_layout size mismatch: batch={batch_size}, t={t_indices.numel()}, s={s_indices.numel()}")
+
+    image_ids[..., 0] = t_indices[:, None]
+    image_ids[..., 1] = s_indices[:, None]
+    return image_ids
 
 
 class MultiControlNet(torch.nn.Module):
@@ -844,12 +870,12 @@ class FluxImageUnit_PromptEmbedder(PipelineUnit):
 
 class FluxImageUnit_ImageIDs(PipelineUnit):
     def __init__(self):
-        super().__init__(input_params=("latents",))
+        super().__init__(input_params=("latents", "sample_layout", "use_3d_rope"))
 
-    def process(self, pipe: Flux4DSRPipeline, latents):
+    def process(self, pipe: Flux4DSRPipeline, latents, sample_layout=None, use_3d_rope=False):
         latent_image_ids = pipe.dit.prepare_image_ids(latents)
+        latent_image_ids = apply_layout_to_image_ids(latent_image_ids, sample_layout=sample_layout, use_3d_rope=use_3d_rope)
         return {"image_ids": latent_image_ids}
-
 
 
 class FluxImageUnit_EmbeddedGuidanceEmbedder(PipelineUnit):
@@ -893,7 +919,7 @@ class FluxImageUnit_Kontext(PipelineUnit):
             # add reference offsets to image_ids
             assert len(kontext_ref_offsets) == 3, "Kontext model uses 3 dim position offsets."
             for i in range(len(kontext_ref_offsets)):
-                image_ids[..., i] += kontext_ref_offsets[i]
+                image_ids[..., i + 1] += kontext_ref_offsets[i]
             kontext_image_ids.append(image_ids)
             kontext_latent = pipe.dit.patchify(kontext_latent)
             kontext_latents.append(kontext_latent)
@@ -1056,6 +1082,7 @@ def model_fn_flux_image(
     guidance=None,
     text_ids=None,
     image_ids=None,
+    sample_layout=None,
     kontext_latents=None,
     kontext_image_ids=None,
     controlnet_inputs=None,
@@ -1103,6 +1130,10 @@ def model_fn_flux_image(
 
     hidden_states = latents
 
+    if image_ids is None:
+        image_ids = dit.prepare_image_ids(hidden_states)
+    image_ids = apply_layout_to_image_ids(image_ids, sample_layout=sample_layout, use_3d_rope=use_3d_rope)
+
     # ControlNet
     if controlnet is not None and controlnet_conditionings is not None:
         controlnet_extra_kwargs = {
@@ -1125,16 +1156,6 @@ def model_fn_flux_image(
             controlnet_conditionings, **controlnet_extra_kwargs
         )
 
-    if image_ids is None:
-        image_ids = dit.prepare_image_ids(hidden_states)
-
-    if use_3d_rope:
-        # fill the first channel with frame/time indices for 3D RoPE
-        num_frames = image_ids.shape[0]
-        frame_ids = torch.arange(num_frames, device=image_ids.device, dtype=image_ids.dtype)
-        image_ids = image_ids.clone()
-        image_ids[..., 0] = frame_ids[:, None]
-
     conditioning = dit.time_embedder(timestep, hidden_states.dtype) + dit.pooled_text_embedder(pooled_prompt_emb)
     if dit.guidance_embedder is not None:
         guidance = guidance * 1000
@@ -1156,7 +1177,7 @@ def model_fn_flux_image(
     text_ids = repeat(text_ids, '1 ... -> b ...', b=image_ids.shape[0])
 
     prompt_emb = dit.context_embedder(prompt_emb)
-    image_rotary_emb = dit.pos_embedder(torch.cat((text_ids, image_ids), dim=1))
+    image_rotary_emb = dit.pos_embedder(concat_position_ids(text_ids, image_ids, len(dit.pos_embedder.axes_dim)))
     attention_mask = None
 
     # TeaCache

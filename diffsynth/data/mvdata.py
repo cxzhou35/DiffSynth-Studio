@@ -202,33 +202,52 @@ class MultiVideoDataset(torch.utils.data.Dataset):
         self.n_frames = len(all_frame_ids)
         self._cam_id_to_idx = {c: i for i, c in enumerate(all_cam_ids)}
 
-    def get_mvdata_ids(self, data_id, domain="temporal"):
+    def get_mvdata_ids(self, data_id, domain="temporal", return_layout=False):
         _, _, scene_id, cam_id, frame_id, scene_info = self._resolve_scene_item(data_id)
 
         if domain == "temporal":
             frame_idx = scene_info["frame_id_to_idx"][frame_id]
             temporal_ids = self._select_window(scene_info["frame_ids"], frame_idx, self.temporal_window_size)
-            return [scene_info["index_map"][(cam_id, fid)] for fid in temporal_ids if (cam_id, fid) in scene_info["index_map"]]
+            data_ids = [scene_info["index_map"][(cam_id, fid)] for fid in temporal_ids if (cam_id, fid) in scene_info["index_map"]]
+            layout = {
+                "layout_type": "temporal",
+                "layout_shape": [len(data_ids), 1],
+                "positions": [(t_idx, 0) for t_idx in range(len(data_ids))],
+            }
+            return (data_ids, layout) if return_layout else data_ids
 
         if domain == "spatial":
             cam_idx = scene_info["cam_id_to_idx"][cam_id]
             spatial_cam_ids = self._select_window(scene_info["cam_ids"], cam_idx, self.spatial_window_size)
-            return [scene_info["index_map"][(cid, frame_id)] for cid in spatial_cam_ids if (cid, frame_id) in scene_info["index_map"]]
+            data_ids = [scene_info["index_map"][(cid, frame_id)] for cid in spatial_cam_ids if (cid, frame_id) in scene_info["index_map"]]
+            layout = {
+                "layout_type": "spatial",
+                "layout_shape": [1, len(data_ids)],
+                "positions": [(0, s_idx) for s_idx in range(len(data_ids))],
+            }
+            return (data_ids, layout) if return_layout else data_ids
 
         raise ValueError(f"Unknown domain: {domain}")
 
-    def get_joint_data_ids(self, data_id):
+    def get_joint_data_ids(self, data_id, return_layout=False):
         _, _, scene_id, cam_id, frame_id, scene_info = self._resolve_scene_item(data_id)
         frame_idx = scene_info["frame_id_to_idx"][frame_id]
         cam_idx = scene_info["cam_id_to_idx"][cam_id]
         temporal_ids = self._select_window(scene_info["frame_ids"], frame_idx, self.joint_temporal_window_size)
         spatial_cam_ids = self._select_window(scene_info["cam_ids"], cam_idx, self.joint_spatial_window_size)
         data_ids = []
-        for fid in temporal_ids:
-            for cid in spatial_cam_ids:
+        positions = []
+        for s_idx, cid in enumerate(spatial_cam_ids):
+            for t_idx, fid in enumerate(temporal_ids):
                 if (cid, fid) in scene_info["index_map"]:
                     data_ids.append(scene_info["index_map"][(cid, fid)])
-        return data_ids
+                    positions.append((t_idx, s_idx))
+        layout = {
+            "layout_type": "joint",
+            "layout_shape": [len(temporal_ids), len(spatial_cam_ids)],
+            "positions": positions,
+        }
+        return (data_ids, layout) if return_layout else data_ids
 
     def _normalize_mixed_mode_probs(self):
         probs = self.mixed_sampling_probs
@@ -254,27 +273,31 @@ class MultiVideoDataset(torch.utils.data.Dataset):
             return ["single"], [1.0]
         return modes, weights
 
-    def get_mixed_data_ids(self, data_id):
+    def get_mixed_data_ids(self, data_id, return_layout=False):
         modes, weights = self._normalize_mixed_mode_probs()
         mode = random.choices(modes, weights=weights, k=1)[0]
         if mode == "temporal":
-            return self.get_mvdata_ids(data_id, domain="temporal")
+            return self.get_mvdata_ids(data_id, domain="temporal", return_layout=return_layout)
         if mode == "spatial":
-            return self.get_mvdata_ids(data_id, domain="spatial")
+            return self.get_mvdata_ids(data_id, domain="spatial", return_layout=return_layout)
         if mode == "joint":
-            return self.get_joint_data_ids(data_id)
-        return [data_id % len(self.data)]
+            return self.get_joint_data_ids(data_id, return_layout=return_layout)
+        data_ids = [data_id % len(self.data)]
+        layout = {"layout_type": "single", "layout_shape": [1, 1], "positions": [(0, 0)]}
+        return (data_ids, layout) if return_layout else data_ids
 
-    def get_data_ids(self, data_id):
+    def get_data_ids(self, data_id, return_layout=False):
         if self.sample_mode == "mixed":
-            return self.get_mixed_data_ids(data_id)
+            return self.get_mixed_data_ids(data_id, return_layout=return_layout)
         if self.temporal_window_size > 1 and self.spatial_window_size > 1:
             raise NotImplementedError("Simultaneous temporal and spatial sampling is not supported in fixed mode. Use sample_mode=\"mixed\" instead.")
         if self.temporal_window_size > 1:
-            return self.get_mvdata_ids(data_id, domain="temporal")
+            return self.get_mvdata_ids(data_id, domain="temporal", return_layout=return_layout)
         if self.spatial_window_size > 1:
-            return self.get_mvdata_ids(data_id, domain="spatial")
-        return [data_id % len(self.data)]
+            return self.get_mvdata_ids(data_id, domain="spatial", return_layout=return_layout)
+        data_ids = [data_id % len(self.data)]
+        layout = {"layout_type": "single", "layout_shape": [1, 1], "positions": [(0, 0)]}
+        return (data_ids, layout) if return_layout else data_ids
 
     def _resolve_key_frame_id(self, frame_ids, target_frame_id):
         if target_frame_id in frame_ids:
@@ -302,9 +325,9 @@ class MultiVideoDataset(torch.utils.data.Dataset):
             data = self.cached_data_operator(data)
             return data
         else:
-            data_ids = self.get_data_ids(data_id)
+            data_ids, layout = self.get_data_ids(data_id, return_layout=True)
             datas = []
-            for id in data_ids:
+            for sample_idx, id in enumerate(data_ids):
                 data = self.data[id].copy()
                 for key in self.data_file_keys:
                     if key in data:
@@ -316,6 +339,11 @@ class MultiVideoDataset(torch.utils.data.Dataset):
                     data["controlnet_key_images"] = self.main_data_operator(
                         self.get_controlnet_key_frame(id, key_data_key="controlnet_images")
                     )
+                t_idx, s_idx = layout["positions"][sample_idx]
+                data["layout_type"] = layout["layout_type"]
+                data["layout_shape"] = list(layout["layout_shape"])
+                data["layout_t_idx"] = int(t_idx)
+                data["layout_s_idx"] = int(s_idx)
                 datas.append(data)
             return datas
 
