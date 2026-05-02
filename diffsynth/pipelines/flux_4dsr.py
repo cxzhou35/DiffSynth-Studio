@@ -950,8 +950,9 @@ class FluxImageUnit_ControlNet(PipelineUnit):
                     image_stack.append(image)
                 image = torch.cat(image_stack, dim=0) # (B, C, H, W)
             else:
+                image = images[0]
                 if controlnet_input.inpaint_mask is not None:
-                    image = self.apply_controlnet_mask_on_image(pipe, images, controlnet_input.inpaint_mask)
+                    image = self.apply_controlnet_mask_on_image(pipe, image, controlnet_input.inpaint_mask)
 
                 image = pipe.preprocess_image(image).to(device=pipe.device, dtype=pipe.torch_dtype)
                 image = pipe.vae_encoder(image, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)

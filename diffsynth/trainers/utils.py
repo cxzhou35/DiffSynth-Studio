@@ -5,6 +5,7 @@ from functools import partial
 import imageio, os, torch, warnings, torchvision, argparse, json
 from ..utils import ModelConfig
 from ..models.utils import load_state_dict
+from ..models.lora import FluxLoRAConverter
 from peft import LoraConfig, inject_adapter_in_model
 from PIL import Image
 import pandas as pd
@@ -489,12 +490,42 @@ class DiffusionTrainingModule(torch.nn.Module):
             )
             if lora_checkpoint is not None:
                 state_dict = load_state_dict(lora_checkpoint)
-                state_dict = self.mapping_lora_state_dict(state_dict)
+                raw_key_count = len(state_dict)
+                if any(key.startswith("lora_unet_") or key.startswith("transformer.") for key in state_dict.keys()):
+                    state_dict = FluxLoRAConverter.align_to_diffsynth_format(state_dict)
+                else:
+                    state_dict = self.mapping_lora_state_dict(state_dict)
+                state_dict = {k: v for k, v in state_dict.items() if not k.endswith(".alpha")}
                 load_result = model.load_state_dict(state_dict, strict=False)
-                print(f"LoRA checkpoint loaded: {lora_checkpoint}, total {len(state_dict)} keys")
+                loaded_keys = len(state_dict) - len(load_result[1])
+                print(f"LoRA checkpoint loaded: {lora_checkpoint}, raw keys={raw_key_count}, mapped keys={len(state_dict)}, loaded keys={loaded_keys}")
                 if len(load_result[1]) > 0:
                     print(f"Warning, LoRA key mismatch! Unexpected keys in LoRA checkpoint: {load_result[1]}")
+                if len(load_result[0]) > 0:
+                    print(f"Warning, missing LoRA keys when loading checkpoint: {load_result[0][:20]}")
             setattr(pipe, lora_base_model, model)
+
+
+def checkpoint_state_dir(checkpoint_path: str) -> str:
+    stem, _ = os.path.splitext(checkpoint_path)
+    return stem + "_state"
+
+
+def trainer_state_path(state_dir: str) -> str:
+    return os.path.join(state_dir, "trainer_state.pt")
+
+
+def load_resume_training_state(accelerator, checkpoint_path: str):
+    state_dir = checkpoint_state_dir(checkpoint_path)
+    state_path = trainer_state_path(state_dir)
+    if not os.path.isdir(state_dir):
+        accelerator.print(f"Warning: checkpoint state dir not found, model weights only: {state_dir}")
+        return {}
+    accelerator.load_state(state_dir)
+    if not os.path.isfile(state_path):
+        accelerator.print(f"Warning: trainer state file not found, optimizer/scheduler restored only: {state_path}")
+        return {}
+    return torch.load(state_path, map_location="cpu", weights_only=False)
 
 
 class ModelLogger:
@@ -507,11 +538,19 @@ class ModelLogger:
         self.steps_per_epoch = None
 
 
-    def on_step_end(self, accelerator, model, save_steps=None, val_steps=None):
+    def on_step_end(self, accelerator, model, optimizer=None, scheduler=None, save_steps=None, val_steps=None, epoch_id=0, step_in_epoch=0):
         self.num_steps += 1
         epoch_idx = 0 if self.num_steps < self.steps_per_epoch else self.num_steps//self.steps_per_epoch-1
         if save_steps is not None and self.num_steps % save_steps == 0:
-            self.save_model(accelerator, model, f"epoch-{epoch_idx}-step-{self.num_steps}.safetensors")
+            self.save_model(
+                accelerator,
+                model,
+                f"epoch-{epoch_idx}-step-{self.num_steps}.safetensors",
+                optimizer=optimizer,
+                scheduler=scheduler,
+                epoch_id=epoch_id,
+                step_in_epoch=step_in_epoch,
+            )
         # if val_steps is not None and self.num_steps % val_steps == 0:
         #     self.validate_model(accelerator, model, f"epoch-{epoch_idx}-step-{self.num_steps}")
 
@@ -526,25 +565,58 @@ class ModelLogger:
         accelerator.log(logs, step=self.num_steps)
 
 
-    def on_epoch_end(self, accelerator, model, epoch_id):
-        self.save_model(accelerator, model, f"epoch-{epoch_id}-step-{self.num_steps}.safetensors")
+    def on_epoch_end(self, accelerator, model, epoch_id, optimizer=None, scheduler=None):
+        step_in_epoch = self.steps_per_epoch if self.steps_per_epoch is not None else 0
+        self.save_model(
+            accelerator,
+            model,
+            f"epoch-{epoch_id}-step-{self.num_steps}.safetensors",
+            optimizer=optimizer,
+            scheduler=scheduler,
+            epoch_id=epoch_id,
+            step_in_epoch=step_in_epoch,
+        )
         # self.validate_model(accelerator, model, f"epoch-{epoch_id}-step-{self.num_steps}")
 
 
-    def on_training_end(self, accelerator, model, save_steps=None):
+    def on_training_end(self, accelerator, model, optimizer=None, scheduler=None, save_steps=None, epoch_id=0):
         if save_steps is not None and self.num_steps % save_steps != 0:
-            self.save_model(accelerator, model, f"step-{self.num_steps}.safetensors")
+            self.save_model(
+                accelerator,
+                model,
+                f"step-{self.num_steps}.safetensors",
+                optimizer=optimizer,
+                scheduler=scheduler,
+                epoch_id=epoch_id,
+                step_in_epoch=0,
+            )
 
 
-    def save_model(self, accelerator, model, file_name):
+    def save_model(self, accelerator, model, file_name, optimizer=None, scheduler=None, epoch_id=0, step_in_epoch=0):
+        accelerator.wait_for_everyone()
+        os.makedirs(self.output_path, exist_ok=True)
+        path = os.path.join(self.output_path, file_name)
+        state_dir = checkpoint_state_dir(path)
+        if accelerator.is_main_process and os.path.isdir(state_dir):
+            shutil.rmtree(state_dir)
         accelerator.wait_for_everyone()
         if accelerator.is_main_process:
             state_dict = accelerator.get_state_dict(model)
             state_dict = accelerator.unwrap_model(model).export_trainable_state_dict(state_dict, remove_prefix=self.remove_prefix_in_ckpt)
             state_dict = self.state_dict_converter(state_dict)
-            os.makedirs(self.output_path, exist_ok=True)
-            path = os.path.join(self.output_path, file_name)
             accelerator.save(state_dict, path, safe_serialization=True)
+        accelerator.wait_for_everyone()
+        if optimizer is not None and scheduler is not None:
+            accelerator.save_state(state_dir)
+            accelerator.wait_for_everyone()
+            if accelerator.is_main_process:
+                trainer_state = {
+                    "num_steps": self.num_steps,
+                    "epoch_id": epoch_id,
+                    "step_in_epoch": step_in_epoch,
+                    "steps_per_epoch": self.steps_per_epoch,
+                }
+                torch.save(trainer_state, trainer_state_path(state_dir))
 
 
     def validate_model(self, accelerator, model, dir_name):
@@ -571,6 +643,7 @@ def launch_training_task(
     tracker_config: dict = None,
     resume_from_ckpt: bool = False,
     project_name: str = None,
+    pretrained_model_path: str = None,
     args = None,
 ):
     if args is not None:
@@ -583,12 +656,16 @@ def launch_training_task(
         gradient_accumulation_steps = args.gradient_accumulation_steps
         find_unused_parameters = args.find_unused_parameters
         output_dir = args.output_path
-        resume_from_ckpt = args.resume_from_ckpt
+        resume_from_ckpt = getattr(args, "resume", False) or getattr(args, "resume_from_ckpt", False)
+        pretrained_model_path = getattr(args, "pretrained_model_path", None)
         project_name = args.project_name
         tracker_config = dict(vars(args))
         base_seed = args.seed
 
     tracker_config = _sanitize_tracker_config(tracker_config)
+
+    if resume_from_ckpt and not pretrained_model_path:
+        raise ValueError("--resume requires --pretrained_model_path")
 
     optimizer = torch.optim.AdamW(model.trainable_modules(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer)
@@ -602,6 +679,7 @@ def launch_training_task(
         project_config=accelerator_project_config,
         kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=find_unused_parameters)],
     )
+    accelerator.register_for_checkpointing(scheduler)
 
     rank_id = accelerator.process_index
     init_global_seed(rank=rank_id, seed=base_seed)
@@ -618,21 +696,47 @@ def launch_training_task(
 
     model_logger.steps_per_epoch = math.ceil(len(dataloader) / gradient_accumulation_steps)
 
-    for epoch_id in range(num_epochs):
+    start_epoch = 0
+    resume_step_in_epoch = 0
+    if resume_from_ckpt and pretrained_model_path:
+        trainer_state = load_resume_training_state(accelerator, pretrained_model_path)
+        model_logger.num_steps = int(trainer_state.get("num_steps", 0))
+        start_epoch = int(trainer_state.get("epoch_id", 0))
+        resume_step_in_epoch = int(trainer_state.get("step_in_epoch", 0))
+        if model_logger.steps_per_epoch is not None and resume_step_in_epoch >= model_logger.steps_per_epoch:
+            start_epoch += 1
+            resume_step_in_epoch = 0
+        accelerator.print(
+            f"Resumed training state from {pretrained_model_path}: start_epoch={start_epoch}, resume_step_in_epoch={resume_step_in_epoch}, num_steps={model_logger.num_steps}"
+        )
+
+    for epoch_id in range(start_epoch, num_epochs):
         progress_bar = tqdm(dataloader, total=len(dataloader), disable=not accelerator.is_local_main_process, desc=f"Training epoch {epoch_id}")
-        for data in progress_bar:
+        for step_in_epoch, data in enumerate(progress_bar):
+            if epoch_id == start_epoch and resume_step_in_epoch > 0 and step_in_epoch < resume_step_in_epoch:
+                continue
             with accelerator.accumulate(model):
                 optimizer.zero_grad()
                 loss, loss_dict = model(data)
                 accelerator.backward(loss)
                 optimizer.step()
-                model_logger.on_step_end(accelerator, model, save_steps, val_steps)
+                model_logger.on_step_end(
+                    accelerator,
+                    model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    save_steps=save_steps,
+                    val_steps=val_steps,
+                    epoch_id=epoch_id,
+                    step_in_epoch=step_in_epoch + 1,
+                )
                 model_logger.record(accelerator, loss_dict, data)
                 logs = {"loss": loss.item(), "step": model_logger.num_steps}
                 progress_bar.set_postfix(**logs)
                 scheduler.step()
-        model_logger.on_epoch_end(accelerator, model, epoch_id)
-    model_logger.on_training_end(accelerator, model, save_steps)
+        resume_step_in_epoch = 0
+        model_logger.on_epoch_end(accelerator, model, epoch_id, optimizer=optimizer, scheduler=scheduler)
+    model_logger.on_training_end(accelerator, model, optimizer=optimizer, scheduler=scheduler, save_steps=save_steps, epoch_id=max(num_epochs - 1, 0))
 
     accelerator.wait_for_everyone()
     accelerator.end_training()
@@ -661,6 +765,8 @@ def wan_parser():
     parser.add_argument("--lora_target_modules", type=str, default="q,k,v,o,ffn.0,ffn.2", help="Which layers LoRA is added to.")
     parser.add_argument("--lora_rank", type=int, default=32, help="Rank of LoRA.")
     parser.add_argument("--lora_checkpoint", type=str, default=None, help="Path to the LoRA checkpoint. If provided, LoRA will be loaded from this checkpoint.")
+    parser.add_argument("--resume", default=False, action="store_true", help="Resume training from a previously saved training checkpoint.")
+    parser.add_argument("--pretrained_model_path", type=str, default=None, help="Path to a saved checkpoint file used to initialize or resume training.")
     parser.add_argument("--extra_inputs", default=None, help="Additional model inputs, comma-separated.")
     parser.add_argument("--use_gradient_checkpointing_offload", default=False, action="store_true", help="Whether to offload gradient checkpointing to CPU memory.")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Gradient accumulation steps.")
@@ -687,6 +793,10 @@ def flux_parser():
     parser.add_argument("--temporal_window_size", type=int, default=4, help="Temporal window size for temporal sampling.")
     parser.add_argument("--use_spatial_sample", default=False, action="store_true", help="Whether to use spatial sampling for mv datasets.")
     parser.add_argument("--spatial_window_size", type=int, default=4, help="Spatial window size for spatial sampling.")
+    parser.add_argument("--sample_mode", type=str, default="fixed", choices=["fixed", "mixed"], help="Sampling mode for mv datasets.")
+    parser.add_argument("--mixed_sampling_probs", nargs=3, type=float, default=[0.4, 0.4, 0.2], help="Probabilities for temporal, spatial, and joint sampling in mixed mode.")
+    parser.add_argument("--joint_temporal_window_size", type=int, default=2, help="Temporal window size used by joint sampling in mixed mode.")
+    parser.add_argument("--joint_spatial_window_size", type=int, default=2, help="Spatial window size used by joint sampling in mixed mode.")
     parser.add_argument("--dit_3d_attn_interval", type=int, default=4, help="Interval for Dit's 3D attention.")
     parser.add_argument("--model_paths", type=str, default=None, help="Paths to load models. In JSON format.")
     parser.add_argument("--model_id_with_origin_paths", type=str, default=None, help="Model ID with origin paths, e.g., Wan-AI/Wan2.1-T2V-1.3B:diffusion_pytorch_model*.safetensors. Comma-separated.")
@@ -699,6 +809,8 @@ def flux_parser():
     parser.add_argument("--lora_target_modules", type=str, default="q,k,v,o,ffn.0,ffn.2", help="Which layers LoRA is added to.")
     parser.add_argument("--lora_rank", type=int, default=32, help="Rank of LoRA.")
     parser.add_argument("--lora_checkpoint", type=str, default=None, help="Path to the LoRA checkpoint. If provided, LoRA will be loaded from this checkpoint.")
+    parser.add_argument("--resume", default=False, action="store_true", help="Resume training from a previously saved training checkpoint.")
+    parser.add_argument("--pretrained_model_path", type=str, default=None, help="Path to a saved checkpoint file used to initialize or resume training.")
     parser.add_argument("--resume_from_ckpt", default=False, action="store_true", help="Whether to use pretrained checkpoint.")
     parser.add_argument("--extra_inputs", default=None, help="Additional model inputs, comma-separated.")
     parser.add_argument("--kontext_ref_offsets", nargs=3, type=int, default=[1, 0, 0], help="Reference frame offsets for kontext module.")
@@ -747,6 +859,8 @@ def qwen_image_parser():
     parser.add_argument("--lora_target_modules", type=str, default="q,k,v,o,ffn.0,ffn.2", help="Which layers LoRA is added to.")
     parser.add_argument("--lora_rank", type=int, default=32, help="Rank of LoRA.")
     parser.add_argument("--lora_checkpoint", type=str, default=None, help="Path to the LoRA checkpoint. If provided, LoRA will be loaded from this checkpoint.")
+    parser.add_argument("--resume", default=False, action="store_true", help="Resume training from a previously saved training checkpoint.")
+    parser.add_argument("--pretrained_model_path", type=str, default=None, help="Path to a saved checkpoint file used to initialize or resume training.")
     parser.add_argument("--extra_inputs", default=None, help="Additional model inputs, comma-separated.")
     parser.add_argument("--use_gradient_checkpointing", default=False, action="store_true", help="Whether to use gradient checkpointing.")
     parser.add_argument("--use_gradient_checkpointing_offload", default=False, action="store_true", help="Whether to offload gradient checkpointing to CPU memory.")

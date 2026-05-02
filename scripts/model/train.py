@@ -130,10 +130,22 @@ def main():
     parser = flux_parser()
     args = parser.parse_args()
 
+    if getattr(args, "resume", False) and not getattr(args, "pretrained_model_path", None):
+        raise ValueError("--resume requires --pretrained_model_path")
+    if getattr(args, "pretrained_model_path", None):
+        if args.lora_checkpoint is not None and args.lora_checkpoint != args.pretrained_model_path:
+            raise ValueError("--lora_checkpoint and --pretrained_model_path are both set but point to different files")
+        args.lora_checkpoint = args.pretrained_model_path
+
     # create dataset from metadata
     datasets = DotDict()
+    train_metadata_path = args.dataset_metadata_path
     for split in ['train', 'val']:
-        metadata_path = args.dataset_metadata_path.replace("train", split)
+        if split == "train":
+            metadata_path = train_metadata_path
+        else:
+            candidate_val_metadata_path = train_metadata_path.replace("train", split)
+            metadata_path = candidate_val_metadata_path if os.path.exists(candidate_val_metadata_path) else train_metadata_path
         dataset = MultiVideoDataset(
             base_path=args.dataset_base_path,
             metadata_path=metadata_path,
@@ -143,6 +155,10 @@ def main():
             temporal_window_size=args.temporal_window_size,
             use_spatial_sample=args.use_spatial_sample,
             spatial_window_size=args.spatial_window_size,
+            sample_mode=args.sample_mode,
+            mixed_sampling_probs=args.mixed_sampling_probs,
+            joint_temporal_window_size=args.joint_temporal_window_size,
+            joint_spatial_window_size=args.joint_spatial_window_size,
             use_tem_key_frame=args.use_tem_key_frame,
             key_frame_chunk=args.key_frame_chunk,
             main_data_operator=MultiVideoDataset.default_image_operator(
