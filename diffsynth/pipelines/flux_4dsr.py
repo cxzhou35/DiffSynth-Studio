@@ -489,7 +489,23 @@ class Flux4DSRPipeline(BasePipeline):
 
         # Decode
         self.load_models_to_device(['vae_decoder'])
-        image = self.vae_decoder(inputs_shared["latents"], device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+        latents_to_decode = inputs_shared["latents"]
+
+        # Decode in small chunks to avoid VAE peak-memory OOM on long frame batches.
+        decode_batch_size = 1 if latents_to_decode.shape[0] > 1 else latents_to_decode.shape[0]
+        decoded_chunks = []
+        for i in range(0, latents_to_decode.shape[0], decode_batch_size):
+            latents_chunk = latents_to_decode[i : i + decode_batch_size]
+            image_chunk = self.vae_decoder(
+                latents_chunk,
+                device=self.device,
+                tiled=tiled,
+                tile_size=tile_size,
+                tile_stride=tile_stride,
+            )
+            decoded_chunks.append(image_chunk)
+
+        image = torch.cat(decoded_chunks, dim=0)
         if image.shape[0] > 1:
             image = self.vae_output_to_video(image)
         else:
@@ -498,6 +514,264 @@ class Flux4DSRPipeline(BasePipeline):
 
         return image
 
+
+    def _slice_batch_value(self, value, indices: torch.Tensor, batch_size: int):
+        if torch.is_tensor(value):
+            if value.ndim > 0 and value.shape[0] == batch_size:
+                return value.index_select(0, indices)
+            return value
+
+        if isinstance(value, list):
+            sliced = []
+            for item in value:
+                if torch.is_tensor(item) and item.ndim > 0 and item.shape[0] == batch_size:
+                    sliced.append(item.index_select(0, indices))
+                else:
+                    sliced.append(item)
+            return sliced
+
+        if isinstance(value, tuple):
+            sliced = []
+            for item in value:
+                if torch.is_tensor(item) and item.ndim > 0 and item.shape[0] == batch_size:
+                    sliced.append(item.index_select(0, indices))
+                else:
+                    sliced.append(item)
+            return tuple(sliced)
+
+        return value
+
+
+    def _build_sliding_windows(
+        self,
+        num_samples: int,
+        sliding_window_size: int,
+        sliding_window_stride: int,
+        sliding_window_shift: int,
+        sliding_bidirectional: bool,
+    ):
+        if sliding_window_size <= 0:
+            raise ValueError(f"sliding_window_size must be > 0, got {sliding_window_size}")
+        if sliding_window_stride <= 0:
+            raise ValueError(f"sliding_window_stride must be > 0, got {sliding_window_stride}")
+        if num_samples <= 0:
+            raise ValueError(f"num_samples must be > 0, got {num_samples}")
+        if sliding_window_size > num_samples:
+            raise ValueError(
+                f"sliding_window_size({sliding_window_size}) must be <= num_samples({num_samples})"
+            )
+        if num_samples % sliding_window_stride != 0:
+            raise ValueError(
+                f"num_samples({num_samples}) should be divisible by sliding_window_stride({sliding_window_stride})"
+            )
+
+        base_indices = torch.arange(num_samples, device=self.device, dtype=torch.long)
+        windows = []
+        directions = (-1, 1) if sliding_bidirectional else (-1,)
+        for direction in directions:
+            for shift in range(sliding_window_shift, sliding_window_shift + num_samples, sliding_window_stride):
+                window = base_indices.roll(shifts=shift * direction)[:sliding_window_size]
+                windows.append(window.clone())
+
+        if len(windows) == 0:
+            raise ValueError("No sliding windows were generated. Check sliding args.")
+        return windows
+
+
+    @torch.no_grad()
+    def sliding_iterative_denoise(
+        self,
+        # Prompt
+        prompt: str,
+        negative_prompt: str = "",
+        cfg_scale: float = 1.0,
+        embedded_guidance: float = 3.5,
+        t5_sequence_length: int = 512,
+        # Image
+        input_image: Image.Image = None,
+        denoising_strength: float = 1.0,
+        # Shape
+        height: int = 1024,
+        width: int = 1024,
+        # Randomness
+        seed: int = None,
+        rand_device: str = "cpu",
+        # Scheduler
+        sigma_shift: float = None,
+        # Steps
+        num_inference_steps: int = 30,
+        # local prompts
+        multidiffusion_prompts=(),
+        multidiffusion_masks=(),
+        multidiffusion_scales=(),
+        # Kontext
+        kontext_images: Union[list[Image.Image], Image.Image] = None,
+        # Kontext reference image position offsets
+        kontext_ref_offsets: list[int] = [1, 0, 0],
+        # ControlNet
+        controlnet_inputs: list[ControlNetInput] = None,
+        # IP-Adapter
+        ipadapter_images: Union[list[Image.Image], Image.Image] = None,
+        ipadapter_scale: float = 1.0,
+        # TeaCache
+        tea_cache_l1_thresh: float = None,
+        # Tile
+        tiled: bool = False,
+        tile_size: int = 128,
+        tile_stride: int = 64,
+        # 3d attn
+        dit_3d_attn_interval: int = 3,
+        use_3d_rope: bool = False,
+        num_samples: int = 1,
+        # Sliding denoise
+        sliding_window_size: int = 4,
+        sliding_window_stride: int = 1,
+        sliding_window_shift: int = 0,
+        sliding_bidirectional: bool = False,
+        sliding_num_denoising_steps: int = 1,
+        sliding_alternation_rounds: Optional[int] = None,
+        # Progress bar
+        progress_bar_cmd=tqdm,
+    ):
+        if sliding_num_denoising_steps <= 0:
+            raise ValueError(
+                f"sliding_num_denoising_steps must be > 0, got {sliding_num_denoising_steps}"
+            )
+
+        self.scheduler.set_timesteps(num_inference_steps, denoising_strength=denoising_strength, shift=sigma_shift)
+
+        inputs_posi = {
+            "prompt": prompt,
+        }
+        inputs_nega = {
+            "negative_prompt": negative_prompt,
+        }
+        inputs_shared = {
+            "cfg_scale": cfg_scale, "embedded_guidance": embedded_guidance, "t5_sequence_length": t5_sequence_length,
+            "input_image": input_image, "denoising_strength": denoising_strength,
+            "height": height, "width": width,
+            "num_samples": num_samples,
+            "seed": seed, "rand_device": rand_device,
+            "sigma_shift": sigma_shift, "num_inference_steps": num_inference_steps,
+            "multidiffusion_prompts": multidiffusion_prompts, "multidiffusion_masks": multidiffusion_masks, "multidiffusion_scales": multidiffusion_scales,
+            "kontext_images": kontext_images,
+            "kontext_ref_offsets": kontext_ref_offsets,
+            "controlnet_inputs": controlnet_inputs,
+            "ipadapter_images": ipadapter_images, "ipadapter_scale": ipadapter_scale,
+            "tea_cache_l1_thresh": tea_cache_l1_thresh,
+            "tiled": tiled, "tile_size": tile_size, "tile_stride": tile_stride,
+            "progress_bar_cmd": progress_bar_cmd,
+            "dit_3d_attn_interval": dit_3d_attn_interval,
+            "use_3d_rope": use_3d_rope,
+        }
+        for unit in self.units:
+            inputs_shared, inputs_posi, inputs_nega = self.unit_runner(unit, self, inputs_shared, inputs_posi, inputs_nega)
+
+        if "tea_cache" in inputs_shared and inputs_shared["tea_cache"] is not None:
+            log("[WARN] sliding_iterative_denoise disables tea_cache for stability.")
+            inputs_shared["tea_cache"] = None
+
+        total_samples = int(inputs_shared["latents"].shape[0])
+        windows = self._build_sliding_windows(
+            total_samples,
+            sliding_window_size=sliding_window_size,
+            sliding_window_stride=sliding_window_stride,
+            sliding_window_shift=sliding_window_shift,
+            sliding_bidirectional=sliding_bidirectional,
+        )
+
+        coverage_per_round = max(
+            1,
+            (sliding_window_size * len(windows) * sliding_num_denoising_steps) // max(total_samples, 1),
+        )
+        if sliding_alternation_rounds is None or sliding_alternation_rounds <= 0:
+            sliding_alternation_rounds = max(1, (num_inference_steps + coverage_per_round - 1) // coverage_per_round)
+
+        timestep_indices = torch.zeros((total_samples,), device=self.device, dtype=torch.long)
+        scheduler_timesteps = self.scheduler.timesteps.to(device=self.device, dtype=self.torch_dtype)
+
+        self.load_models_to_device(self.in_iteration_models)
+        models = {name: getattr(self, name) for name in self.in_iteration_models}
+
+        for alt_id in range(sliding_alternation_rounds):
+            window_iter = progress_bar_cmd(
+                windows,
+                desc=f"Sliding denoise {alt_id + 1}/{sliding_alternation_rounds}",
+                total=len(windows),
+            )
+            for window in window_iter:
+                for _ in range(sliding_num_denoising_steps):
+                    active_mask = timestep_indices[window] < num_inference_steps
+                    if not active_mask.any():
+                        break
+
+                    active_indices = window[active_mask]
+                    local_inputs_shared = {
+                        key: self._slice_batch_value(value, active_indices, total_samples)
+                        for key, value in inputs_shared.items()
+                    }
+                    local_inputs_shared["latents"] = inputs_shared["latents"].index_select(0, active_indices)
+                    local_inputs_shared["num_samples"] = int(active_indices.shape[0])
+
+                    local_timestep_ids = timestep_indices.index_select(0, active_indices)
+                    local_timestep = scheduler_timesteps.index_select(0, local_timestep_ids)
+                    progress_id = int(local_timestep_ids.float().mean().item())
+
+                    noise_pred_posi = self.model_fn(
+                        **models,
+                        **local_inputs_shared,
+                        **inputs_posi,
+                        timestep=local_timestep,
+                        progress_id=progress_id,
+                    )
+                    if cfg_scale != 1.0:
+                        noise_pred_nega = self.model_fn(
+                            **models,
+                            **local_inputs_shared,
+                            **inputs_nega,
+                            timestep=local_timestep,
+                            progress_id=progress_id,
+                        )
+                        noise_pred = noise_pred_nega + cfg_scale * (noise_pred_posi - noise_pred_nega)
+                    else:
+                        noise_pred = noise_pred_posi
+
+                    latents_window = self.scheduler.step(noise_pred, local_timestep, local_inputs_shared["latents"])
+                    inputs_shared["latents"][active_indices] = latents_window
+                    timestep_indices[active_indices] += 1
+
+            if torch.all(timestep_indices >= num_inference_steps):
+                break
+
+        if torch.any(timestep_indices < num_inference_steps):
+            remaining = int((timestep_indices < num_inference_steps).sum().item())
+            log(f"[WARN] sliding_iterative_denoise finished with {remaining} samples not fully denoised to target steps.")
+
+        self.load_models_to_device(['vae_decoder'])
+        latents_to_decode = inputs_shared["latents"]
+
+        # Decode in small chunks to avoid VAE peak-memory OOM on long frame batches.
+        decode_batch_size = 1 if latents_to_decode.shape[0] > 1 else latents_to_decode.shape[0]
+        decoded_chunks = []
+        for i in range(0, latents_to_decode.shape[0], decode_batch_size):
+            latents_chunk = latents_to_decode[i : i + decode_batch_size]
+            image_chunk = self.vae_decoder(
+                latents_chunk,
+                device=self.device,
+                tiled=tiled,
+                tile_size=tile_size,
+                tile_stride=tile_stride,
+            )
+            decoded_chunks.append(image_chunk)
+
+        image = torch.cat(decoded_chunks, dim=0)
+        if image.shape[0] > 1:
+            image = self.vae_output_to_video(image)
+        else:
+            image = self.vae_output_to_image(image)
+        self.load_models_to_device([])
+
+        return image
 
 
 class FluxImageUnit_ShapeChecker(PipelineUnit):
