@@ -125,6 +125,47 @@ class FluxTrainingModule(DiffusionTrainingModule):
             inputs_shared, inputs_posi, inputs_nega = self.pipe.unit_runner(unit, self.pipe, inputs_shared, inputs_posi, inputs_nega)
         return {**inputs_shared, **inputs_posi}
 
+    @torch.no_grad()
+    def eval_inference(self, datas, num_inference_steps=8, seed=0):
+        layout_shape = datas[0].get("layout_shape", [1, 1])
+        sample_layout = {
+            "layout_type": datas[0].get("layout_type", "single"),
+            "layout_shape": [int(layout_shape[0]), int(layout_shape[1])],
+            "t_indices": [int(data.get("layout_t_idx", 0)) for data in datas],
+            "s_indices": [int(data.get("layout_s_idx", 0)) for data in datas],
+        }
+
+        controlnet_inputs = []
+        for extra_input in self.extra_inputs:
+            if extra_input.startswith("controlnet_"):
+                controlnet_inputs.append(
+                    ControlNetInput(images=[data[extra_input] for data in datas], scale=0.9)
+                )
+
+        try:
+            images = self.pipe(
+                prompt=datas[0]["prompt"],
+                input_image=None,
+                controlnet_inputs=controlnet_inputs if controlnet_inputs else None,
+                height=datas[0]["image"].size[1],
+                width=datas[0]["image"].size[0],
+                seed=seed,
+                rand_device=self.pipe.device,
+                num_inference_steps=num_inference_steps,
+                num_samples=len(datas),
+                dit_3d_attn_interval=self.dit_3d_attn_interval,
+                use_3d_rope=self.use_3d_rope,
+                sample_layout=sample_layout,
+                tiled=False,
+                tile_size=128,
+                tile_stride=64,
+                progress_bar_cmd=lambda x: x,
+            )
+        finally:
+            self.pipe.scheduler.set_timesteps(1000, training=True)
+
+        return images if isinstance(images, list) else [images]
+
     def forward(self, data, inputs=None):
         if inputs is None: inputs = self.forward_preprocess(data)
         models = {name: getattr(self.pipe, name) for name in self.pipe.in_iteration_models}
@@ -217,6 +258,9 @@ def main():
         args.output_path,
         remove_prefix_in_ckpt=args.remove_prefix_in_ckpt,
         state_dict_converter=FluxLoRAConverter.align_to_opensource_format if args.align_to_opensource_format else lambda x:x,
+        num_eval_samples=args.num_eval_samples,
+        eval_num_inference_steps=args.eval_num_inference_steps,
+        eval_seed=args.eval_seed,
     )
 
     launch_training_task(

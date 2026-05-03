@@ -1,5 +1,6 @@
 from typing import Any, Never
 import math
+import random
 import shutil
 from functools import partial
 import imageio, os, torch, warnings, torchvision, argparse, json
@@ -515,27 +516,104 @@ def trainer_state_path(state_dir: str) -> str:
     return os.path.join(state_dir, "trainer_state.pt")
 
 
-def load_resume_training_state(accelerator, checkpoint_path: str):
+def optimizer_state_path(state_dir: str) -> str:
+    return os.path.join(state_dir, "optimizer.bin")
+
+
+def scheduler_state_path(state_dir: str) -> str:
+    return os.path.join(state_dir, "scheduler.bin")
+
+
+def random_state_path(state_dir: str, rank: int) -> str:
+    return os.path.join(state_dir, f"random_states_{rank}.pkl")
+
+
+def capture_random_state() -> dict[str, Any]:
+    state = {
+        "python": random.getstate(),
+        "torch": torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        state["cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def restore_random_state(state: dict[str, Any]):
+    if "python" in state:
+        random.setstate(state["python"])
+    if "torch" in state:
+        torch.set_rng_state(state["torch"])
+    if torch.cuda.is_available() and "cuda" in state and state["cuda"] is not None:
+        torch.cuda.set_rng_state_all(state["cuda"])
+
+
+def save_resume_training_state(accelerator, state_dir: str, optimizer, scheduler, trainer_state: dict[str, Any]):
+    if accelerator.is_main_process and os.path.isdir(state_dir):
+        shutil.rmtree(state_dir)
+    accelerator.wait_for_everyone()
+
+    if accelerator.is_main_process:
+        os.makedirs(state_dir, exist_ok=True)
+        torch.save(optimizer.state_dict(), optimizer_state_path(state_dir))
+        torch.save(scheduler.state_dict(), scheduler_state_path(state_dir))
+        torch.save(trainer_state, trainer_state_path(state_dir))
+    accelerator.wait_for_everyone()
+
+    os.makedirs(state_dir, exist_ok=True)
+    torch.save(capture_random_state(), random_state_path(state_dir, accelerator.process_index))
+    accelerator.wait_for_everyone()
+
+
+def load_resume_training_state(accelerator, checkpoint_path: str, optimizer=None, scheduler=None):
     state_dir = checkpoint_state_dir(checkpoint_path)
     state_path = trainer_state_path(state_dir)
     if not os.path.isdir(state_dir):
         accelerator.print(f"Warning: checkpoint state dir not found, model weights only: {state_dir}")
         return {}
-    accelerator.load_state(state_dir)
+
+    opt_path = optimizer_state_path(state_dir)
+    if optimizer is not None and os.path.isfile(opt_path):
+        optimizer.load_state_dict(torch.load(opt_path, map_location="cpu", weights_only=False))
+    elif optimizer is not None:
+        accelerator.print(f"Warning: optimizer state file not found: {opt_path}")
+
+    sch_path = scheduler_state_path(state_dir)
+    if scheduler is not None and os.path.isfile(sch_path):
+        scheduler.load_state_dict(torch.load(sch_path, map_location="cpu", weights_only=False))
+    elif scheduler is not None:
+        accelerator.print(f"Warning: scheduler state file not found: {sch_path}")
+
+    rng_path = random_state_path(state_dir, accelerator.process_index)
+    if os.path.isfile(rng_path):
+        restore_random_state(torch.load(rng_path, map_location="cpu", weights_only=False))
+    else:
+        accelerator.print(f"Warning: random state file not found for rank {accelerator.process_index}: {rng_path}")
+
     if not os.path.isfile(state_path):
-        accelerator.print(f"Warning: trainer state file not found, optimizer/scheduler restored only: {state_path}")
+        accelerator.print(f"Warning: trainer state file not found: {state_path}")
         return {}
     return torch.load(state_path, map_location="cpu", weights_only=False)
 
 
 class ModelLogger:
-    def __init__(self, output_path, remove_prefix_in_ckpt=None, state_dict_converter=lambda x:x):
+    def __init__(
+        self,
+        output_path,
+        remove_prefix_in_ckpt=None,
+        state_dict_converter=lambda x:x,
+        num_eval_samples=4,
+        eval_num_inference_steps=8,
+        eval_seed=0,
+    ):
         self.output_path = output_path
         self.remove_prefix_in_ckpt = remove_prefix_in_ckpt
         self.state_dict_converter = state_dict_converter
         self.num_steps = 0
         self.val_dataset = None
         self.steps_per_epoch = None
+        self.num_eval_samples = num_eval_samples
+        self.eval_num_inference_steps = eval_num_inference_steps
+        self.eval_seed = eval_seed
 
 
     def on_step_end(self, accelerator, model, optimizer=None, scheduler=None, save_steps=None, val_steps=None, epoch_id=0, step_in_epoch=0):
@@ -551,9 +629,6 @@ class ModelLogger:
                 epoch_id=epoch_id,
                 step_in_epoch=step_in_epoch,
             )
-        # if val_steps is not None and self.num_steps % val_steps == 0:
-        #     self.validate_model(accelerator, model, f"epoch-{epoch_idx}-step-{self.num_steps}")
-
 
     def record(self, accelerator, loss_dict, data):
         logs = DotDict()
@@ -576,7 +651,7 @@ class ModelLogger:
             epoch_id=epoch_id,
             step_in_epoch=step_in_epoch,
         )
-        # self.validate_model(accelerator, model, f"epoch-{epoch_id}-step-{self.num_steps}")
+        self.validate_model(accelerator, model, f"epoch-{epoch_id}-step-{self.num_steps}")
 
 
     def on_training_end(self, accelerator, model, optimizer=None, scheduler=None, save_steps=None, epoch_id=0):
@@ -607,21 +682,80 @@ class ModelLogger:
             accelerator.save(state_dict, path, safe_serialization=True)
         accelerator.wait_for_everyone()
         if optimizer is not None and scheduler is not None:
-            accelerator.save_state(state_dir)
-            accelerator.wait_for_everyone()
-            if accelerator.is_main_process:
-                trainer_state = {
-                    "num_steps": self.num_steps,
-                    "epoch_id": epoch_id,
-                    "step_in_epoch": step_in_epoch,
-                    "steps_per_epoch": self.steps_per_epoch,
-                }
-                torch.save(trainer_state, trainer_state_path(state_dir))
+            trainer_state = {
+                "num_steps": self.num_steps,
+                "epoch_id": epoch_id,
+                "step_in_epoch": step_in_epoch,
+                "steps_per_epoch": self.steps_per_epoch,
+            }
+            save_resume_training_state(accelerator, state_dir, optimizer, scheduler, trainer_state)
 
+
+    def _save_eval_pair(self, pred_image, gt_image, eval_save_dir, sample_name):
+        pred_dir = os.path.join(eval_save_dir, "pred")
+        gt_dir = os.path.join(eval_save_dir, "gt")
+        compare_dir = os.path.join(eval_save_dir, "compare")
+        os.makedirs(pred_dir, exist_ok=True)
+        os.makedirs(gt_dir, exist_ok=True)
+        os.makedirs(compare_dir, exist_ok=True)
+
+        pred_image = pred_image.convert("RGB")
+        gt_image = gt_image.convert("RGB")
+        if pred_image.size != gt_image.size:
+            pred_image = pred_image.resize(gt_image.size, Image.BICUBIC)
+
+        pred_path = os.path.join(pred_dir, f"{sample_name}.png")
+        gt_path = os.path.join(gt_dir, f"{sample_name}.png")
+        compare_path = os.path.join(compare_dir, f"{sample_name}.png")
+        pred_image.save(pred_path)
+        gt_image.save(gt_path)
+
+        compare = Image.new("RGB", (gt_image.width * 2, gt_image.height))
+        compare.paste(pred_image, (0, 0))
+        compare.paste(gt_image, (gt_image.width, 0))
+        compare.save(compare_path)
 
     def validate_model(self, accelerator, model, dir_name):
-        # TODO: add avalidation codes
-        pass
+        accelerator.wait_for_everyone()
+        if not accelerator.is_main_process:
+            accelerator.wait_for_everyone()
+            return
+        if self.val_dataset is None:
+            accelerator.print("Warning: validation dataloader is not available; skip training eval.")
+            accelerator.wait_for_everyone()
+            return
+
+        eval_save_dir = os.path.join(self.output_path, "training_evals", dir_name)
+        os.makedirs(eval_save_dir, exist_ok=True)
+        unwrapped_model = accelerator.unwrap_model(model)
+        was_training = unwrapped_model.training
+        unwrapped_model.eval()
+
+        saved = 0
+        try:
+            with torch.no_grad():
+                for data_id, datas in enumerate(self.val_dataset):
+                    pred_images = unwrapped_model.eval_inference(
+                        datas,
+                        num_inference_steps=self.eval_num_inference_steps,
+                        seed=self.eval_seed + data_id,
+                    )
+                    for sample_idx, (pred_image, data) in enumerate(zip(pred_images, datas)):
+                        if saved >= self.num_eval_samples:
+                            break
+                        scene_id = data.get("scene_id", data.get("__scene_id", "scene"))
+                        view_id = data.get("view_id", data.get("__cam_id", sample_idx))
+                        frame_id = data.get("frame_id", data.get("__frame_id", sample_idx))
+                        sample_name = f"sample-{saved:03d}_{scene_id}_v{view_id}_f{frame_id}"
+                        self._save_eval_pair(pred_image, data["image"], eval_save_dir, sample_name)
+                        saved += 1
+                    if saved >= self.num_eval_samples:
+                        break
+            accelerator.print(f"Saved {saved} training eval samples to {eval_save_dir}")
+        finally:
+            if was_training:
+                unwrapped_model.train()
+            accelerator.wait_for_everyone()
 
 
 def launch_training_task(
@@ -691,6 +825,7 @@ def launch_training_task(
         val_dataloader = None
 
     model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, train_dataloader, scheduler)
+    model_logger.val_dataset = val_dataloader
     if accelerator.is_main_process:
         accelerator.init_trackers(project_name, tracker_config)
 
@@ -699,7 +834,7 @@ def launch_training_task(
     start_epoch = 0
     resume_step_in_epoch = 0
     if resume_from_ckpt and pretrained_model_path:
-        trainer_state = load_resume_training_state(accelerator, pretrained_model_path)
+        trainer_state = load_resume_training_state(accelerator, pretrained_model_path, optimizer=optimizer, scheduler=scheduler)
         model_logger.num_steps = int(trainer_state.get("num_steps", 0))
         start_epoch = int(trainer_state.get("epoch_id", 0))
         resume_step_in_epoch = int(trainer_state.get("step_in_epoch", 0))
@@ -820,7 +955,10 @@ def flux_parser():
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Gradient accumulation steps.")
     parser.add_argument("--find_unused_parameters", default=False, action="store_true", help="Whether to find unused parameters in DDP.")
     parser.add_argument("--save_steps", type=int, default=None, help="Number of checkpoint saving invervals. If None, checkpoints will be saved every epoch.")
-    parser.add_argument("--val_steps", type=int, default=None, help="Number of model validate invervals.")
+    parser.add_argument("--val_steps", type=int, default=None, help="Deprecated; training eval now runs after each epoch checkpoint save.")
+    parser.add_argument("--num_eval_samples", type=int, default=4, help="Number of validation samples saved by training eval.")
+    parser.add_argument("--eval_num_inference_steps", type=int, default=8, help="Number of denoising steps used by training eval inference.")
+    parser.add_argument("--eval_seed", type=int, default=0, help="Base random seed used by training eval inference.")
     parser.add_argument("--dataset_num_workers", type=int, default=0, help="Number of workers for data loading.")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
     parser.add_argument("--use_al_vae", default=False, action="store_true", help="Whether use the anti-aliased components for vae.")

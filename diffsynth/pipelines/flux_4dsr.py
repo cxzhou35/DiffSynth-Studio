@@ -467,6 +467,7 @@ class Flux4DSRPipeline(BasePipeline):
         dit_3d_attn_interval: int = 3,
         use_3d_rope: bool = False,
         num_samples: int = 1,
+        sample_layout: dict = None,
         # Progress bar
         progress_bar_cmd = tqdm,
     ):
@@ -496,6 +497,7 @@ class Flux4DSRPipeline(BasePipeline):
             "progress_bar_cmd": progress_bar_cmd,
             "dit_3d_attn_interval": dit_3d_attn_interval,
             "use_3d_rope": use_3d_rope,
+            "sample_layout": sample_layout,
         }
         for unit in self.units:
             inputs_shared, inputs_posi, inputs_nega = self.unit_runner(unit, self, inputs_shared, inputs_posi, inputs_nega)
